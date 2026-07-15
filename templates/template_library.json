@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "ambiguity_margin": 0.08,
+  "cross_template_iou": 0.25,
+  "entries": [
+    {
+      "template_id": "8dc6dbdd1d1f43eaaa23f5d9d46fce9f",
+      "name": "t1",
+      "template_file": "8dc6dbdd_t1.json",
+      "enabled": true,
+      "color_bgr": [
+        0,
+        180,
+        255
+      ],
+      "parameters": {
+        "score_threshold": 0.72,
+        "angle_min": -180.0,
+        "angle_max": 178.0,
+        "angle_step": 2.0,
+        "scale_min": 0.5,
+        "scale_max": 1.8,
+        "scale_step": 0.05,
+        "nms_iou_threshold": 0.25,
+        "use_edges": false,
+        "feature_mode": "pose_tolerant",
+        "max_candidates_per_transform": 20,
+        "max_results": 200
+      }
+    },
+    {
+      "template_id": "cbea476ec6e64526ad1747ff1fb1663a",
+      "name": "Black_Textile_01",
+      "template_file": "cbea476e_Black_Textile_01.json",
+      "enabled": true,
+      "color_bgr": [
+        255,
+        140,
+        0
+      ],
+      "parameters": {
+        "score_threshold": 0.6,
+        "angle_min": -180,
+        "angle_max": 178,
+        "angle_step": 2,
+        "scale_min": 0.5,
+        "scale_max": 1.8,
+        "scale_step": 0.05,
+        "nms_iou_threshold": 0.25,
+        "use_edges": false,
+        "feature_mode": "dark_textile",
+        "max_candidates_per_transform": 20,
+        "max_results": 50
+      }
+    }
+  ]
+}
