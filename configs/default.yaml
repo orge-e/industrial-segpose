@@ -1,0 +1,26 @@
+project: {name: industrial-segpose}
+input: {resize_max_dimension: 2048, roi: null}
+preprocessing:
+  color_space: gray
+  gaussian_blur_kernel: 5
+  median_blur_kernel: 0
+  clahe_enabled: false
+  clahe_clip_limit: 2.0
+  contrast_alpha: 1.0
+segmentation: {backend: threshold, invert: false}
+threshold: {method: otsu, value: 127}
+adaptive_threshold: {block_size: 31, c: 5}
+color_range: {space: hsv, lower: [0, 0, 0], upper: [180, 255, 200]}
+morphology: {kernel_size: 3, open_iterations: 1, close_iterations: 1}
+watershed: {distance_threshold_ratio: 0.35, background_dilate_iterations: 3, min_marker_area: 30}
+filter:
+  min_area_px: 100
+  max_area_px: null
+  min_width_px: 5
+  min_height_px: 5
+  min_aspect_ratio: 0.05
+  max_aspect_ratio: 20.0
+  min_circularity: 0.0
+  reject_border_objects: false
+measurement: {center_method: moments, angle_method: pca, angle_range: 0_180, min_orientation_confidence: 0.15}
+output: {save_annotated: true, save_masks: true, save_label_map: true, save_debug: false, save_json: true, save_csv: true}
