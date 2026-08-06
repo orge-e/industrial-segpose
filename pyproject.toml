@@ -19,6 +19,7 @@ industrial-segpose = "industrial_segpose.cli:main"
 industrial-segpose-ui = "industrial_segpose.template_ui:main"
 industrial-segpose-export-k230 = "industrial_segpose.k230_export:main"
 industrial-segpose-validate-k230 = "industrial_segpose.k230_validation:main"
+industrial-segpose-calibrate = "industrial_segpose.calibration_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

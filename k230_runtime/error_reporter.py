@@ -83,3 +83,32 @@ class ErrorReporter:
         except Exception as reporting_error:
             print("error reporter failed", reporting_error)
             return None
+
+    def event(self, category, fields=None, maximum_bytes=262144):
+        """Append a compact RTC-independent event and rotate at a size limit."""
+        try:
+            _ensure_dir(self.root)
+            index_path = self.root + "/event_index.txt"
+            index = _read_index(index_path) + 1
+            _write_index(index_path, index)
+            path = self.root + "/runtime_events.log"
+            try:
+                size = os.stat(path)[6]
+            except OSError:
+                size = 0
+            if size >= int(maximum_bytes):
+                previous = path + ".old"
+                try:
+                    os.remove(previous)
+                except OSError:
+                    pass
+                os.rename(path, previous)
+            values = ["event_id=%06d" % index, "category=%s" % category]
+            for key, value in sorted((fields or {}).items()):
+                values.append("%s=%s" % (key, value))
+            with open(path, "a") as stream:
+                stream.write("|".join(values) + "\n")
+            return path
+        except Exception as reporting_error:
+            print("event logger failed", reporting_error)
+            return None

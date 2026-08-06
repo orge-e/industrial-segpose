@@ -21,12 +21,20 @@ def test_pick_target_json_lines_round_trip():
         123456,
         world_point=(184.2, 72.1),
         arrival_time_ms=820,
+        quality_flags=4,
+        candidate_pick_points=[[130.0, 95.0]],
+        safe_radius_px=11.5,
+        auto_pick_allowed=False,
+        scan_id=3,
+        view_id=2,
     )
 
     encoded = encode_message(message)
 
     assert encoded.endswith("\n")
     assert decode_message(encoded) == message
+    assert message["quality_flags"] == 4
+    assert message["scan_id"] == 3
 
 
 def test_protocol_rejects_unsafe_values():

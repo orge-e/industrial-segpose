@@ -4,14 +4,14 @@
   "cross_template_iou": 0.25,
   "entries": [
     {
-      "template_id": "8dc6dbdd1d1f43eaaa23f5d9d46fce9f",
-      "name": "t1",
-      "template_file": "8dc6dbdd_t1.json",
-      "enabled": true,
+      "template_id": "2e369572b17c4d78bfd0caed3402d5b5",
+      "name": "pink01",
+      "template_file": "2e369572_pink01.json",
+      "enabled": false,
       "color_bgr": [
+        255,
         0,
-        180,
-        255
+        180
       ],
       "parameters": {
         "score_threshold": 0.72,
@@ -25,13 +25,18 @@
         "use_edges": false,
         "feature_mode": "pose_tolerant",
         "max_candidates_per_transform": 20,
-        "max_results": 200
+        "max_results": 200,
+        "coarse_to_fine": true,
+        "coarse_trigger_transforms": 600,
+        "coarse_angle_step": 12.0,
+        "coarse_scale_step": 0.12,
+        "refine_transform_limit": 16
       }
     },
     {
-      "template_id": "cbea476ec6e64526ad1747ff1fb1663a",
-      "name": "Black_Textile_01",
-      "template_file": "cbea476e_Black_Textile_01.json",
+      "template_id": "7feed3e8c89c407bbac065e40c25b597",
+      "name": "black01",
+      "template_file": "7feed3e8_black01.json",
       "enabled": true,
       "color_bgr": [
         255,
@@ -39,18 +44,53 @@
         0
       ],
       "parameters": {
-        "score_threshold": 0.6,
-        "angle_min": -180,
-        "angle_max": 178,
-        "angle_step": 2,
+        "score_threshold": 0.72,
+        "angle_min": -180.0,
+        "angle_max": 178.0,
+        "angle_step": 2.0,
         "scale_min": 0.5,
         "scale_max": 1.8,
         "scale_step": 0.05,
         "nms_iou_threshold": 0.25,
         "use_edges": false,
-        "feature_mode": "dark_textile",
+        "feature_mode": "pose_tolerant",
         "max_candidates_per_transform": 20,
-        "max_results": 50
+        "max_results": 200,
+        "coarse_to_fine": true,
+        "coarse_trigger_transforms": 600,
+        "coarse_angle_step": 12.0,
+        "coarse_scale_step": 0.12,
+        "refine_transform_limit": 16
+      }
+    },
+    {
+      "template_id": "2873700e6d534bc190f880bc4d86875e",
+      "name": "pink02",
+      "template_file": "2873700e_pink02.json",
+      "enabled": true,
+      "color_bgr": [
+        255,
+        0,
+        180
+      ],
+      "parameters": {
+        "score_threshold": 0.72,
+        "angle_min": -180.0,
+        "angle_max": 178.0,
+        "angle_step": 2.0,
+        "scale_min": 0.5,
+        "scale_max": 1.8,
+        "scale_step": 0.05,
+        "nms_iou_threshold": 0.25,
+        "use_edges": false,
+        "feature_mode": "pose_tolerant",
+        "max_candidates_per_transform": 20,
+        "max_results": 200,
+        "coarse_to_fine": true,
+        "coarse_trigger_transforms": 600,
+        "coarse_angle_step": 12.0,
+        "coarse_scale_step": 0.12,
+        "refine_transform_limit": 16
       }
     }
   ]

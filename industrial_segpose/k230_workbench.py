@@ -36,7 +36,9 @@ class K230CaptureImage:
 class DeploymentCheck:
     """Preflight result for a desktop template library."""
 
+    exported_templates: int
     enabled_templates: int
+    disabled_templates: int
     invalid_templates: tuple[str, ...]
 
 
@@ -98,19 +100,23 @@ def check_template_library(template_root: str | Path) -> DeploymentCheck:
     """Fail early when no usable enabled template can be exported."""
 
     library = TemplateLibrary(template_root).load()
+    exported = 0
     enabled = 0
+    disabled = 0
     invalid: list[str] = []
     for loaded in library.load_entries():
-        if not loaded.entry.enabled:
-            continue
         if loaded.valid:
-            enabled += 1
+            exported += 1
+            if loaded.entry.enabled:
+                enabled += 1
+            else:
+                disabled += 1
         else:
             invalid.append(f"{loaded.entry.name}: {loaded.error}")
     if enabled == 0:
         detail = "；".join(invalid) if invalid else "模板库为空或全部已停用"
         raise ValueError(f"无法生成K230部署包：{detail}")
-    return DeploymentCheck(enabled, tuple(invalid))
+    return DeploymentCheck(exported, enabled, disabled, tuple(invalid))
 
 
 def build_workbench_deployment(

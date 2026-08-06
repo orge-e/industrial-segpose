@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from .io.image_reader import write_image
+from .measurement.pick_points import plan_pick_points
 from .template_matching import TemplateLibrary
 
 
@@ -61,12 +62,6 @@ def _mask_center(mask: np.ndarray) -> tuple[float, float]:
     return moments["m10"] / moments["m00"], moments["m01"] / moments["m00"]
 
 
-def _safe_pick_point(mask: np.ndarray) -> tuple[tuple[float, float], float]:
-    distance = cv2.distanceTransform(np.where(mask > 0, 255, 0).astype(np.uint8), cv2.DIST_L2, 5)
-    _, radius, _, location = cv2.minMaxLoc(distance)
-    return (float(location[0]), float(location[1])), float(radius)
-
-
 def _contour(mask: np.ndarray) -> list[list[float]]:
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -77,14 +72,30 @@ def _contour(mask: np.ndarray) -> list[list[float]]:
     return simplified.astype(float).tolist()
 
 
-def _reference_angle(mask: np.ndarray) -> float:
+def _reference_orientation(mask: np.ndarray) -> tuple[float, float]:
+    """Return a directed 0-360 pose and its head/tail confidence."""
     points = cv2.findNonZero(mask)
     if points is None or len(points) < 2:
-        return 0.0
+        return 0.0, 0.0
     samples = points.reshape(-1, 2).astype(np.float32)
-    _, eigenvectors, _ = cv2.PCACompute2(samples, mean=None)
-    vector = eigenvectors[0]
-    return float(np.degrees(np.arctan2(vector[1], vector[0])))
+    mean, eigenvectors, eigenvalues = cv2.PCACompute2(samples, mean=None)
+    vector = eigenvectors[0].astype(np.float64)
+    x, y, width, height = cv2.boundingRect(points)
+    bbox_center = np.asarray([x + width / 2.0, y + height / 2.0], dtype=np.float64)
+    centroid = mean.reshape(-1).astype(np.float64)
+    projection = float(np.dot(bbox_center - centroid, vector))
+    if projection < 0.0:
+        vector = -vector
+        projection = -projection
+    major_sigma = float(np.sqrt(max(float(eigenvalues.reshape(-1)[0]), 1e-9)))
+    confidence = float(np.clip(projection / max(major_sigma, 1.0), 0.0, 1.0))
+    angle = float(np.degrees(np.arctan2(vector[1], vector[0])) % 360.0)
+    return angle, confidence
+
+
+def _reference_angle(mask: np.ndarray) -> float:
+    """Backward-compatible angle helper used by older callers."""
+    return _reference_orientation(mask)[0]
 
 
 def _shape_features(mask: np.ndarray) -> dict:
@@ -240,8 +251,6 @@ def export_k230_bundle(
     errors: dict[str, str] = {}
     for loaded in library.load_entries():
         entry = loaded.entry
-        if not entry.enabled:
-            continue
         if not loaded.valid:
             errors[entry.template_id] = loaded.error or "invalid template"
             continue
@@ -266,23 +275,36 @@ def export_k230_bundle(
             write_image(files["edge"], edge)
             write_image(files["pose"], pose)
             center = _mask_center(mask)
-            pick_point, pick_radius = _safe_pick_point(mask)
+            pick_candidates = plan_pick_points(mask, maximum_points=3, minimum_safe_radius_px=3.0)
+            if not pick_candidates:
+                raise ValueError("Template has no suction-safe pick point")
+            primary_pick = pick_candidates[0]
             mask_area = int(np.count_nonzero(mask))
+            reference_angle, direction_confidence = _reference_orientation(mask)
             metadata = {
                 "format_version": K230_BUNDLE_VERSION,
                 "template_id": entry.template_id,
                 "name": entry.name,
-                "enabled": True,
+                "enabled": bool(entry.enabled),
                 "color_bgr": list(entry.color_bgr),
                 "width": int(mask.shape[1]),
                 "height": int(mask.shape[0]),
                 "reference_center_xy": list(center),
-                "pick_point_xy": list(pick_point),
-                "pick_radius_px": pick_radius,
+                # The legacy fields remain for older K230 runtimes.
+                "pick_point_xy": [primary_pick.x, primary_pick.y],
+                "pick_radius_px": primary_pick.safe_radius_px,
+                "pick_points": [candidate.to_dict() for candidate in pick_candidates],
+                "pick_planning": {
+                    "method": "distance_transform_local_maxima",
+                    "minimum_safe_radius_px": 3.0,
+                    "candidate_count": len(pick_candidates),
+                },
                 "mask_area_px": mask_area,
                 "fill_ratio": float(mask_area / mask.size),
                 "shape_features": _shape_features(mask),
-                "reference_angle_deg": _reference_angle(mask),
+                "reference_angle_deg": reference_angle,
+                "orientation_period_deg": 360 if direction_confidence >= 0.08 else 180,
+                "orientation_direction_confidence": direction_confidence,
                 "pose_canvas_size": POSE_CANVAS_SIZE,
                 "segmentation": _segmentation_profile(image, mask),
                 "contour_points": _contour(mask),
@@ -297,6 +319,7 @@ def export_k230_bundle(
                 {
                     "template_id": entry.template_id,
                     "name": entry.name,
+                    "enabled": bool(entry.enabled),
                     "metadata_file": f"{entry.template_id}/metadata.json",
                     "metadata_sha256": _sha256(metadata_path),
                 }

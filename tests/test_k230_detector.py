@@ -29,6 +29,10 @@ class CanMVAxisBlob(FakeBlob):
         return (140, 50, 140, 150)
 
 
+class DirectedFakeBlob(FakeBlob):
+    def cx(self): return self.values[5] + 10.0
+
+
 class FakeFrame:
     def __init__(self, blobs):
         self.blobs = blobs
@@ -56,6 +60,11 @@ def _template(template_id="pink", name="Pink"):
         "reference_angle_deg": 10.0,
         "reference_center_xy": [100.0, 50.0],
         "pick_point_xy": [110.0, 55.0],
+        "pick_radius_px": 12.0,
+        "pick_points": [
+            {"x": 110.0, "y": 55.0, "safe_radius_px": 12.0, "score": 1.0},
+            {"x": 80.0, "y": 50.0, "safe_radius_px": 8.0, "score": 0.7},
+        ],
         "parameters": {"scale_min": 0.5, "scale_max": 1.5},
         "segmentation": {
             "lab_thresholds": [[30, 100, 5, 70, -20, 50]],
@@ -77,6 +86,12 @@ def test_blob_detector_returns_center_relative_angle_and_pick_point():
     assert result["angle_deg"] == 30.0
     assert result["confidence"] > 0.9
     assert result["pick_point"] != result["image_center"]
+    assert result["primary_pick_point"]["safe_radius_px"] > 0
+    assert len(result["candidate_pick_points"]) == 1
+    assert result["quality_flags"] == 0
+    assert result["auto_pick_allowed"] is True
+    assert result["angle_period_deg"] == 180
+    assert result["angle_direction_reliable"] is False
     assert frame.calls[0][1]["pixels_threshold"] == 80
 
 
@@ -90,6 +105,19 @@ def test_blob_detector_handles_canmv_axis_line_methods_without_none_values():
     assert detections[0]["image_center"] == [140.0, 100.0]
 
 
+def test_asymmetric_blob_supports_directed_360_degree_pose():
+    template = _template()
+    template["orientation_direction_confidence"] = 0.5
+    detector = BlobTemplateDetector(FakeLibrary([template]))
+    frame = FakeFrame([DirectedFakeBlob(40, 50, 200, 100, 11000, 40)])
+
+    result = detector.detect(frame)[0]
+
+    assert result["angle_deg"] == 210.0
+    assert result["angle_period_deg"] == 360
+    assert result["angle_direction_reliable"] is True
+
+
 def test_multi_template_close_scores_are_ambiguous():
     detector = BlobTemplateDetector(FakeLibrary([_template("a", "A"), _template("b", "B")], 0.08))
     frame = FakeFrame([FakeBlob(10, 20, 200, 100, 11000, 20)])
@@ -99,6 +127,7 @@ def test_multi_template_close_scores_are_ambiguous():
     assert len(results) == 1
     assert results[0]["status"] == "ambiguous"
     assert len(results[0]["candidate_templates"]) >= 2
+    assert results[0]["auto_pick_allowed"] is False
 
 
 def test_low_shape_score_is_rejected_before_reaching_ui():

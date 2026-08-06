@@ -1,11 +1,13 @@
 """K230 manual-run entry point.  Actuator output remains disabled."""
 
 from k230_runtime.canmv_adapter import CanMVClock, CanMVPipelineCamera, ConsoleTransport
+from k230_runtime.calibration import K230PlanarCalibration
 from k230_runtime.capture import SessionCaptureManager
 from k230_runtime.app_ui import IndustrialTouchUI
 from k230_runtime.config import load_config
 from k230_runtime.detector import BlobTemplateDetector
 from k230_runtime.error_reporter import ErrorReporter
+from k230_runtime.image_quality import K230ImageQualityGate
 from k230_runtime.device_app import DeviceVisionApp
 from k230_runtime.overlay import DetectionOverlay
 from k230_runtime.template_library import K230TemplateLibrary
@@ -51,10 +53,28 @@ def main():
         capture_config.get("jpeg_quality", 95),
     )
     error_reporter = ErrorReporter(config.get("error_reports", {}).get("root", "/sdcard/industrial_vision/logs"))
+    quality_gate = K230ImageQualityGate(config.get("quality_gate", {}))
+    calibration = None
+    calibration_config = config.get("calibration", {})
+    if calibration_config.get("enabled", False):
+        try:
+            calibration = K230PlanarCalibration.load(calibration_config["path"])
+        except Exception as error:
+            # Calibration is optional during the current visual-development
+            # stage.  A missing or damaged file must not prevent the detection
+            # application from starting.
+            error_reporter.report(
+                error,
+                "calibration_load",
+                {"path": calibration_config.get("path", "")},
+            )
+            print("calibration disabled after load failure", error)
     DeviceVisionApp(
         config, camera, detector, tracker, overlay, ConsoleTransport(), CanMVClock(),
         touch_ui=touch_ui, template_builder=template_builder, template_library=library,
         capture_manager=capture_manager, error_reporter=error_reporter,
+        quality_gate=quality_gate,
+        calibration=calibration,
     ).run()
 
 

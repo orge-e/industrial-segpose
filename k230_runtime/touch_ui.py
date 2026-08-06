@@ -36,8 +36,8 @@ class TouchUI:
                 self.roi_points = []
                 self.message = "SELECT ROI: 2 CORNERS"
                 return "new_template"
-            self.message = "COUNT RESET"
-            return "reset_count"
+            self.message = "TRACKING REFRESHED"
+            return "reset_tracking"
         if self.mode == "select_roi":
             self.roi_points.append((x, y))
             if len(self.roi_points) == 1:

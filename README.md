@@ -105,11 +105,11 @@ industrial-segpose-ui
 
 ### K230采集图像与模板工作台
 
-“建立模板”页新增“K230采集图像 / 模板工作台”。它可以直接读取已挂载的SD卡根目录、`industrial_vision/`、`captures/`或单个`session_NNNN/`目录，不要求先把照片复制进项目。工作台会按批次列出图片、显示尺寸和可缩放预览，并提供完整流程：
+“建立模板”页新增“K230采集图像 / 模板工作台”。如果SD卡以盘符挂载，可直接读取根目录、`industrial_vision/`、`captures/`或单个`session_NNNN/`目录；如果设备在Windows中仅显示为CanMV便携设备（WPD/MTP），点击“从已连接K230同步”，程序会先复制到`build/k230_capture_cache/`再读取。工作台会按批次列出图片、显示尺寸和可缩放预览，并提供完整流程：
 
 1. 选择一张图片作为基准图，进入现有自动分割与Mask画笔修正界面；确认后保存到电脑端`templates/`模板库。
 2. 多选其他现场图片执行批量回放。程序先按K230实际格式转换当前模板库，再使用板端同类LAB分割与几何评分生成标注预览和`validation_report.json`。
-3. 点击“生成完整K230部署包”，输出`build/k230_sdcard/industrial_vision/`。包内包含运行代码、配置和转换后的模板库，不包含原始采集照片。
+3. 回到主“建立模板”页面点击“生成完整K230部署包”，输出`build/k230_sdcard/industrial_vision/`。所有有效模板都会写入部署包；停用模板保留停用状态，可在K230模板库中重新启用。包内不包含原始采集照片。
 
 模块部署仍由操作者手动完成；工作台不会自动覆盖SD卡，也不会修改K230根目录的启动文件。这样可以在电脑上完成精细分割、人工复核和批量验收，再把同一份已验证部署包复制到模块。
 
@@ -168,6 +168,18 @@ JSON 输出包含所用模板、分类数量、待确认数量、损坏模板错
 
 ## K230 本地部署包
 
+K230视觉与任务控制子系统的统一目标结构、质量位标志、候选抓取点及平面标定框架见 [实施状态说明](docs/vision_task_subsystem.md)。
+
+电脑端可点击模板建立页的“相机—机械坐标标定”，选择点位JSON并输出带校验的标定文件、逐点CSV和Markdown误差报告；也可使用命令行：
+
+```powershell
+python -m industrial_segpose.calibration_cli --points configs/calibration_points.example.json --output calibration_output
+```
+
+若要随部署包复制标定文件，请将输出目录改为项目根目录下的`calibration`。现场验证前，K230配置中的`calibration.enabled`保持`false`；启用后板端会按“单应性局部坐标 + 轴位置快照 + 吸头偏置”输出`world_point_mm`。
+
+K230检测前会执行轻量质量门控。坏帧显示`QUALITY:RETRY`并自动获取下一帧，连续超过配置次数显示`QUALITY:ALARM`；曝光恢复后自动回到`QUALITY:OK`。质量状态变化记录在`logs/runtime_events.log`，日志达到256 KB后只保留一个轮转备份，避免持续占用SD卡。
+
 在未连接开发板时，所有 K230 开发和生成物均保存在本项目的 D 盘目录。生成可复制到 SD 卡的目录：
 
 ```powershell
@@ -176,13 +188,13 @@ python -m industrial_segpose.k230_deploy --project . --output build/k230_sdcard 
 
 生成结果为 `build/k230_sdcard/industrial_vision/`。连接 K230 后只需把该目录复制到 `/sdcard/industrial_vision/`，再手动运行其中的 `main.py`；验证完成前不要替换 SD 卡根目录原有启动程序。板端当前为只显示、计数和控制台输出的安全模式，不会控制吸盘。
 
-生产环境推荐由电脑端建立和验证关键模板库，K230当前只保留禁用的建模入口。可以使用桌面UI中的“K230采集图像 / 模板工作台”，也可以通过命令行用K230采集的整批现场原图离线回放：
+生产环境推荐由电脑端建立和验证关键模板库；K230同时保留用于现场调试的建模入口。可以使用桌面UI中的“K230采集图像 / 模板工作台”，也可以通过命令行用K230采集的整批现场原图离线回放：
 
 ```powershell
 python -m industrial_segpose.k230_export --library templates --output build/k230_templates --overwrite
 python -m industrial_segpose.k230_validation --bundle build/k230_templates/template_library.json --images <采集图片目录> --output reports/k230_validation
 ```
 
-当前生产配置采用“电脑端建立和验证模板库，K230只加载模板并执行检测”。板端建模代码及模板库入口暂时保留，但 `device_config.json` 默认设置 `template_authoring.enabled=false`，不会进入拍摄、冻结、分割或板端保存流程；点击模板建立入口只会提示使用电脑端模板包。这一限制用于优先保证模块持续检测稳定性，后续经过专项实机验证后才重新启用板端建模。
+默认仍以“电脑端精细建库、K230执行检测”为主，但 `device_config.json` 已保留并启用板端调试建模。板端按“实时取景→拍摄并冻结唯一帧→自动分割预览→原图/Mask/叠加检查→可选ROI修正→保存”的固定流程运行；重拍会释放冻结帧并返回实时取景。关键生产模板仍应在电脑端批量回放验收后部署。
 
-K230 检测页会在目标框旁明确显示模板名称、目标流水号、识别状态、中心坐标、角度和置信度。内部模板 UUID 不再显示在屏幕上，但仍保留在 JSON 与串口协议中供程序追踪。顶部的 `NOW` 表示当前画面目标数，`LINE TOTAL` 表示穿越计数线后的累计数量，两者不会混用。周期心跳 JSON 同时携带 `current_objects`、当前分类数和计数线累计分类数；真正穿越计数线的目标继续单独输出 `pick_target`。
+K230 检测页会在目标框旁和右侧固定结果面板中明确显示模板名称、目标流水号、识别状态、中心坐标、角度和置信度。模板名称采用独立的高对比白色文字绘制，避免目标框颜色在实机视频层上导致文字不可见。内部模板 UUID 不在屏幕上显示，但仍保留在 JSON 与串口协议中供程序追踪。顶部 `COUNT` 仅表示当前画面内识别到的工件数量，`TYPES` 表示当前画面的分类数量；界面不再显示产线累计数量或计数线。周期心跳 JSON 的 `frame_total`、`counts_by_template` 和 `current_objects` 同样描述当前画面。

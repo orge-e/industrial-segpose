@@ -20,3 +20,17 @@ def test_error_reporter_writes_numbered_and_latest_traceback(tmp_path):
 
     second = reporter.report(RuntimeError("render failed"), "render")
     assert second.endswith("error_000002.log")
+
+
+def test_event_logger_appends_compact_records_and_rotates(tmp_path):
+    reporter = ErrorReporter(tmp_path)
+    path = reporter.event("image_quality", {"decision": "retry", "frame": 8}, maximum_bytes=80)
+    reporter.event("image_quality", {"decision": "alarm", "issues": "underexposed"}, maximum_bytes=80)
+
+    combined = Path(path).read_text(encoding="utf-8")
+    previous = tmp_path / "runtime_events.log.old"
+    if previous.exists():
+        combined += previous.read_text(encoding="utf-8")
+    assert "category=image_quality" in combined
+    assert "decision=retry" in combined
+    assert "decision=alarm" in combined

@@ -32,6 +32,15 @@ class Detector:
         raise RuntimeError("axis failure")
 
 
+class CountingDetector:
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self, frame, timestamp_ms):
+        self.calls += 1
+        return []
+
+
 class Tracker:
     total_count = 0
     counts = {}
@@ -248,3 +257,24 @@ def test_heartbeat_exposes_current_template_center_angle_and_counts():
     assert counters["current_objects"][0]["template_id"] == "template_abc"
     assert counters["current_objects"][0]["image_center"] == [123.0, 234.0]
     assert counters["current_objects"][0]["angle_deg"] == 27.5
+
+
+def test_bad_quality_frame_is_rejected_before_detection():
+    class QualityGate:
+        def evaluate(self, frame):
+            return {
+                "passed": False, "decision": "retry", "issues": ["underexposed"],
+                "retry_index": 1, "maximum_retries": 3,
+            }
+
+    detector = CountingDetector()
+    ui = TouchUI()
+    app = DeviceVisionApp(
+        {"heartbeat_interval_ms": 1000}, Camera(), detector, Tracker(), object(),
+        Transport(), Clock(), touch_ui=ui, template_library=Library(), quality_gate=QualityGate(),
+    )
+
+    assert app.process_once() is True
+    assert detector.calls == 0
+    assert app.rejected == 1
+    assert ui.quality_status == "QUALITY:RETRY 1/3"

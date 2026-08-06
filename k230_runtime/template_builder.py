@@ -243,7 +243,6 @@ class OnDeviceTemplateBuilder:
         edge.save(directory + "/" + assets["edge"])
         pose.save(directory + "/" + assets["pose"])
 
-        angle = math.degrees(blob.rotation())
         blob_width = max(1, int(blob.w()))
         blob_height = max(1, int(blob.h()))
         major_axis = _axis_length(blob, "major_axis_line", max(blob_width, blob_height))
@@ -252,6 +251,19 @@ class OnDeviceTemplateBuilder:
             major_axis, minor_axis = minor_axis, major_axis
         axis_fill_ratio = float(blob.pixels()) / max(major_axis * minor_axis, 1.0)
         expected_pixels = int(blob.pixels())
+        base_angle = float(math.degrees(blob.rotation()))
+        center_x = float(blob.cx())
+        center_y = float(blob.cy())
+        bbox_center_x = float(blob.x()) + float(blob.w()) / 2.0
+        bbox_center_y = float(blob.y()) + float(blob.h()) / 2.0
+        unit_x = math.cos(math.radians(base_angle))
+        unit_y = math.sin(math.radians(base_angle))
+        direction_projection = ((bbox_center_x - center_x) * unit_x + (bbox_center_y - center_y) * unit_y)
+        if direction_projection < 0.0:
+            base_angle += 180.0
+            direction_projection = -direction_projection
+        reference_angle = base_angle % 360.0
+        direction_confidence = min(1.0, direction_projection / max(major_axis * 0.25, 1.0))
         metadata = {
             "format_version": 1,
             "template_id": template_id,
@@ -262,6 +274,17 @@ class OnDeviceTemplateBuilder:
             "reference_center_xy": [rect[2] / 2.0, rect[3] / 2.0],
             "pick_point_xy": [rect[2] / 2.0, rect[3] / 2.0],
             "pick_radius_px": min(rect[2], rect[3]) * 0.15,
+            "pick_points": [{
+                "x": rect[2] / 2.0,
+                "y": rect[3] / 2.0,
+                "safe_radius_px": min(rect[2], rect[3]) * 0.15,
+                "score": 1.0,
+            }],
+            "pick_planning": {
+                "method": "board_template_fallback",
+                "minimum_safe_radius_px": 3.0,
+                "candidate_count": 1,
+            },
             "mask_area_px": int(blob.pixels()),
             "fill_ratio": float(blob.density()),
             "shape_features": {
@@ -269,7 +292,9 @@ class OnDeviceTemplateBuilder:
                 "minor_axis_length_px": minor_axis,
                 "axis_fill_ratio": axis_fill_ratio,
             },
-            "reference_angle_deg": float(angle),
+            "reference_angle_deg": float(reference_angle),
+            "orientation_period_deg": 360 if direction_confidence >= 0.08 else 180,
+            "orientation_direction_confidence": float(direction_confidence),
             "pose_canvas_size": self.pose_size,
             "segmentation": {
                 "mode": segmentation_mode,

@@ -33,6 +33,14 @@ def make_pick_target(
     world_point=None,
     arrival_time_ms=None,
     status="ready",
+    quality_flags=0,
+    candidate_pick_points=None,
+    safe_radius_px=None,
+    auto_pick_allowed=True,
+    scan_id=None,
+    view_id=None,
+    angle_period_deg=None,
+    angle_direction_reliable=None,
 ):
     message = {
         "protocol_version": PROTOCOL_VERSION,
@@ -46,7 +54,21 @@ def make_pick_target(
         "angle_deg": float(angle_deg),
         "timestamp_ms": int(timestamp_ms),
         "status": status,
+        "quality_flags": int(quality_flags),
+        "auto_pick_allowed": bool(auto_pick_allowed),
     }
+    if candidate_pick_points is not None:
+        message["candidate_pick_points"] = list(candidate_pick_points)
+    if safe_radius_px is not None:
+        message["safe_radius_px"] = float(safe_radius_px)
+    if scan_id is not None:
+        message["scan_id"] = int(scan_id)
+    if view_id is not None:
+        message["view_id"] = int(view_id)
+    if angle_period_deg is not None:
+        message["angle_period_deg"] = int(angle_period_deg)
+    if angle_direction_reliable is not None:
+        message["angle_direction_reliable"] = bool(angle_direction_reliable)
     if world_point is not None:
         message["world_point_mm"] = [float(world_point[0]), float(world_point[1])]
     if arrival_time_ms is not None:
@@ -105,6 +127,14 @@ def validate_message(message):
             _number(point[0], key)
             _number(point[1], key)
         _number(message.get("angle_deg"), "angle_deg")
+        if int(message.get("quality_flags", 0)) < 0:
+            raise ValueError("quality_flags must be non-negative")
+        candidates = message.get("candidate_pick_points", [])
+        if not isinstance(candidates, list) or len(candidates) > 3:
+            raise ValueError("candidate_pick_points must be a list of at most 3 points")
+        for point in candidates:
+            if not isinstance(point, (list, tuple, dict)):
+                raise ValueError("candidate pick point has invalid format")
         if message.get("status") not in _STATUSES:
             raise ValueError("invalid target status")
     elif message_type == "pick_ack":
