@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from industrial_segpose.template_matching import METHOD_LABELS, build_assisted_mask, locate_assisted_template
+from industrial_segpose.template_matching import METHOD_LABELS, analyze_template_mask, build_assisted_mask, locate_assisted_template
 
 
 def synthetic_irregular(background, foreground):
@@ -97,3 +97,17 @@ def test_full_image_auto_location_ignores_dark_border_and_returns_local_mask():
     restored = np.zeros_like(truth)
     restored[y : y + height, x : x + width] = selection.mask
     assert mask_iou(restored, truth) > 0.94
+
+
+def test_template_mask_quality_reports_fragmentation_and_border_contact():
+    mask = np.zeros((100, 140), np.uint8)
+    cv2.rectangle(mask, (0, 15), (45, 80), 255, -1)
+    cv2.rectangle(mask, (90, 25), (130, 75), 255, -1)
+
+    quality = analyze_template_mask(mask)
+
+    assert not quality.valid
+    assert quality.component_count == 2
+    assert quality.touches_border
+    assert "分离区域" in quality.message
+    assert "边界" in quality.message

@@ -65,6 +65,8 @@ class TemplateModel:
         name: str,
         source_image: str | None = None,
         mask: np.ndarray | None = None,
+        tighten_mask: bool = False,
+        padding_ratio: float = 0.04,
     ) -> "TemplateModel":
         x, y, width, height = map(int, roi_xywh)
         image_height, image_width = source.shape[:2]
@@ -81,6 +83,22 @@ class TemplateModel:
             if candidate.shape[:2] != (height, width):
                 raise ValueError("Selection mask must match either the source image or selected ROI")
             crop_mask = candidate.copy()
+        if tighten_mask and crop_mask is not None:
+            if not 0.0 <= padding_ratio <= 0.5:
+                raise ValueError("Template padding ratio must be in [0, 0.5]")
+            points = cv2.findNonZero(np.where(crop_mask > 0, 255, 0).astype(np.uint8))
+            if points is None or len(points) < 25:
+                raise ValueError("Template mask is empty and cannot be tightened")
+            mask_x, mask_y, mask_width, mask_height = cv2.boundingRect(points)
+            padding = max(3, int(round(min(mask_width, mask_height) * padding_ratio)))
+            left = max(0, mask_x - padding)
+            top = max(0, mask_y - padding)
+            right = min(width, mask_x + mask_width + padding)
+            bottom = min(height, mask_y + mask_height + padding)
+            crop = crop[top:bottom, left:right].copy()
+            crop_mask = crop_mask[top:bottom, left:right].copy()
+            x, y = x + left, y + top
+            width, height = right - left, bottom - top
         return cls(
             name=name.strip(),
             image=crop,
@@ -110,7 +128,8 @@ class TemplateModel:
             "reference_center_xy": [center_x, center_y],
             "mask_area_px": int(np.count_nonzero(self.mask)),
             "contour_points": self.contour.astype(float).tolist(),
-            "source_image": self.source_image,
+            # Keep metadata portable and avoid leaking workstation/user paths.
+            "source_image": Path(self.source_image).name if self.source_image else None,
             "roi_xywh": list(self.roi_xywh) if self.roi_xywh else None,
             "created_at": created_at,
         }

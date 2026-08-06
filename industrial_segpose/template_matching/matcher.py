@@ -27,6 +27,11 @@ class MatchParameters:
     feature_mode: str = "auto"
     max_candidates_per_transform: int = 20
     max_results: int = 200
+    coarse_to_fine: bool = True
+    coarse_trigger_transforms: int = 600
+    coarse_angle_step: float = 12.0
+    coarse_scale_step: float = 0.12
+    refine_transform_limit: int = 16
 
     def validate(self) -> None:
         if not 0.0 < self.score_threshold <= 1.0:
@@ -39,6 +44,10 @@ class MatchParameters:
             raise ValueError("NMS IoU threshold must be in [0, 1]")
         if self.max_candidates_per_transform < 1 or self.max_results < 1:
             raise ValueError("Candidate and result limits must be positive")
+        if self.coarse_trigger_transforms < 1 or self.refine_transform_limit < 1:
+            raise ValueError("Coarse-to-fine limits must be positive")
+        if self.coarse_angle_step <= 0 or self.coarse_scale_step <= 0:
+            raise ValueError("Coarse-to-fine steps must be positive")
         if self.feature_mode not in {"auto", "edges", "gray", "textile_chroma", "pose_tolerant", "dark_textile"}:
             raise ValueError("Feature mode must be auto, edges, gray, textile_chroma, pose_tolerant, or dark_textile")
         angle_count = int((self.angle_max - self.angle_min) / self.angle_step) + 1
@@ -147,6 +156,7 @@ class TemplateMatcher:
         self.parameters.validate()
         self._variant_cache_key: MatchParameters | None = None
         self._variant_cache: list[_TemplateVariant] = []
+        self._grid_variant_cache: dict[tuple, list[_TemplateVariant]] = {}
 
     @staticmethod
     def _prepare(image: np.ndarray, use_edges: bool, feature_mode: str = "auto") -> np.ndarray:
@@ -188,9 +198,28 @@ class TemplateMatcher:
                 progress(1, 1)
             return matches
         scene = self._prepare(image, params.use_edges, params.feature_mode)
+        angle_count = len(_values(params.angle_min, params.angle_max, params.angle_step))
+        scale_count = len(_values(params.scale_min, params.scale_max, params.scale_step))
+        if params.coarse_to_fine and angle_count * scale_count > params.coarse_trigger_transforms:
+            return self._match_coarse_to_fine(scene, progress)
         variants = self._variants()
-        total = len(variants)
+        candidates, _ = self._scan_variants(scene, variants, params.score_threshold, progress)
+        return self._finalize(candidates)
+
+    def _scan_variants(
+        self,
+        scene: np.ndarray,
+        variants: list[_TemplateVariant],
+        threshold: float,
+        progress: Callable[[int, int], None] | None = None,
+        progress_offset: int = 0,
+        progress_total: int | None = None,
+        collect_candidates: bool = True,
+    ) -> tuple[list[_Candidate], list[tuple[float, _TemplateVariant]]]:
+        params = self.parameters
+        total = progress_total or len(variants)
         candidates: list[_Candidate] = []
+        ranking: list[tuple[float, _TemplateVariant]] = []
         for done, variant in enumerate(variants, 1):
             rotated = variant.image
             rotated_mask = variant.mask
@@ -198,8 +227,13 @@ class TemplateMatcher:
             if rotated_height <= scene.shape[0] and rotated_width <= scene.shape[1]:
                 response = cv2.matchTemplate(scene, rotated, cv2.TM_CCORR_NORMED, mask=rotated_mask)
                 response[~np.isfinite(response)] = -1.0
+                ranking.append((float(np.max(response)), variant))
+                if not collect_candidates:
+                    if progress:
+                        progress(progress_offset + done, total)
+                    continue
                 local_max = response == cv2.dilate(response, np.ones((3, 3), np.uint8))
-                ys, xs = np.where(local_max & (response >= params.score_threshold))
+                ys, xs = np.where(local_max & (response >= threshold))
                 if len(xs):
                     scores = response[ys, xs]
                     order = np.argsort(scores)[::-1][: params.max_candidates_per_transform]
@@ -214,7 +248,62 @@ class TemplateMatcher:
                         radius = 0.6 * min(float(rect[1][0]), float(rect[1][1]))
                         candidates.append(_Candidate(center_x, center_y, _normalize_angle(variant.angle), float(scores[index]), float(variant.scale), box, hull, radius))
             if progress:
-                progress(done, total)
+                progress(progress_offset + done, total)
+        return candidates, ranking
+
+    def _match_coarse_to_fine(
+        self,
+        scene: np.ndarray,
+        progress: Callable[[int, int], None] | None,
+    ) -> list[TemplateMatch]:
+        """Reduce large angle/scale grids, then refine the best transform regions."""
+        params = self.parameters
+        coarse_angle_step = max(params.angle_step, params.coarse_angle_step)
+        coarse_scale_step = max(params.scale_step, params.coarse_scale_step)
+        coarse_angles = _values(params.angle_min, params.angle_max, coarse_angle_step)
+        coarse_scales = _values(params.scale_min, params.scale_max, coarse_scale_step)
+        coarse_variants = self._variants_for_grid(coarse_angles, coarse_scales)
+        _, ranking = self._scan_variants(scene, coarse_variants, 1.1, collect_candidates=False)
+
+        selected: list[_TemplateVariant] = []
+        for score, variant in sorted(ranking, key=lambda item: item[0], reverse=True):
+            if score < max(0.20, params.score_threshold - 0.35):
+                continue
+            separated = all(
+                abs(variant.angle - kept.angle) >= coarse_angle_step * 0.45
+                or abs(variant.scale - kept.scale) >= coarse_scale_step * 0.45
+                for kept in selected
+            )
+            if separated:
+                selected.append(variant)
+            if len(selected) >= params.refine_transform_limit:
+                break
+        if not selected:
+            if progress:
+                progress(len(coarse_variants), len(coarse_variants))
+            return []
+
+        refine_pairs: set[tuple[float, float]] = set()
+        for variant in selected:
+            angle_start = max(params.angle_min, variant.angle - coarse_angle_step)
+            angle_stop = min(params.angle_max, variant.angle + coarse_angle_step)
+            scale_start = max(params.scale_min, variant.scale - coarse_scale_step)
+            scale_stop = min(params.scale_max, variant.scale + coarse_scale_step)
+            for angle in _values(angle_start, angle_stop, params.angle_step):
+                for scale in _values(scale_start, scale_stop, params.scale_step):
+                    refine_pairs.add((round(float(angle), 9), round(float(scale), 9)))
+        # Build only requested angle/scale pairs; a rectangular grid would undo
+        # the reduction when selected coarse regions are far apart.
+        refine_variants = self._variants_for_pairs(sorted(refine_pairs))
+        total = len(coarse_variants) + len(refine_variants)
+        candidates, _ = self._scan_variants(
+            scene,
+            refine_variants,
+            params.score_threshold,
+            progress,
+            len(coarse_variants),
+            total,
+        )
         return self._finalize(candidates)
 
     @staticmethod
@@ -425,14 +514,45 @@ class TemplateMatcher:
         params = self.parameters
         if self._variant_cache_key == params and self._variant_cache:
             return self._variant_cache
+        angles = _values(params.angle_min, params.angle_max, params.angle_step)
+        scales = _values(params.scale_min, params.scale_max, params.scale_step)
+        variants = self._variants_for_grid(angles, scales)
+        self._variant_cache_key = params
+        self._variant_cache = variants
+        return variants
+
+    def _variants_for_grid(
+        self,
+        angles: Iterable[float],
+        scales: Iterable[float],
+    ) -> list[_TemplateVariant]:
+        angle_values = tuple(round(float(value), 9) for value in angles)
+        scale_values = tuple(round(float(value), 9) for value in scales)
+        pairs = tuple((angle, scale) for scale in scale_values for angle in angle_values)
+        return self._variants_for_pairs(pairs)
+
+    def _variants_for_pairs(
+        self,
+        pairs: Iterable[tuple[float, float]],
+    ) -> list[_TemplateVariant]:
+        params = self.parameters
+        pair_values = tuple(
+            (round(float(angle), 9), round(float(scale), 9))
+            for angle, scale in pairs
+        )
+        key = (params, pair_values)
+        cached = self._grid_variant_cache.get(key)
+        if cached is not None:
+            return cached
         template = self._prepare(self.model.image, params.use_edges, params.feature_mode)
         template_mask = self.model.mask
         reference_center = np.asarray([self.model.reference_center_xy], dtype=np.float32).reshape(-1, 1, 2)
         template_contour = self.model.contour
-        angles = _values(params.angle_min, params.angle_max, params.angle_step)
-        scales = _values(params.scale_min, params.scale_max, params.scale_step)
         variants: list[_TemplateVariant] = []
-        for scale in scales:
+        grouped: dict[float, list[float]] = {}
+        for angle, scale in pair_values:
+            grouped.setdefault(scale, []).append(angle)
+        for scale, angle_values in grouped.items():
             scaled_width = max(5, int(round(template.shape[1] * scale)))
             scaled_height = max(5, int(round(template.shape[0] * scale)))
             scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
@@ -446,7 +566,7 @@ class TemplateMatcher:
             scaled_contour[:, 0] *= scale_x
             scaled_contour[:, 1] *= scale_y
             border = 0
-            for angle in angles:
+            for angle in angle_values:
                 matrix, rotated_width, rotated_height = _rotation_geometry(scaled_width, scaled_height, angle)
                 rotated = cv2.warpAffine(scaled, matrix, (rotated_width, rotated_height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
                 rotated_mask = cv2.warpAffine(scaled_mask, matrix, (rotated_width, rotated_height), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -457,8 +577,9 @@ class TemplateMatcher:
                 valid_values = rotated[rotated_mask > 0]
                 if valid_values.size and float(np.std(valid_values)) > 1e-6:
                     variants.append(_TemplateVariant(rotated, rotated_mask, rotated_center, rotated_contour, float(angle), float(scale)))
-        self._variant_cache_key = params
-        self._variant_cache = variants
+        if len(self._grid_variant_cache) >= 6:
+            self._grid_variant_cache.clear()
+        self._grid_variant_cache[key] = variants
         return variants
 
     def _finalize(self, candidates: list[_Candidate]) -> list[TemplateMatch]:

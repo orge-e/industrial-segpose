@@ -176,6 +176,31 @@ class TemplateLibrary:
         self.get(template_id).parameters = parameters
         self.save()
 
+    def rename(self, template_id: str, name: str) -> None:
+        """Rename the display class while keeping the stable internal ID."""
+
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError("Template name cannot be empty")
+        if len(normalized) > 48:
+            raise ValueError("Template name must not exceed 48 characters")
+        entry = self.get(template_id)
+        self._assert_name_available(normalized, excluding_id=template_id)
+        model_path = self.root / entry.template_file
+        model = TemplateModel.load(model_path)
+        previous_entry_name = entry.name
+        previous_model_name = model.name
+        try:
+            model.name = normalized
+            model.save(model_path)
+            entry.name = normalized
+            self.save()
+        except Exception:
+            entry.name = previous_entry_name
+            model.name = previous_model_name
+            model.save(model_path)
+            raise
+
     def load_entries(self) -> list[LoadedTemplateEntry]:
         loaded: list[LoadedTemplateEntry] = []
         for entry in self.entries:

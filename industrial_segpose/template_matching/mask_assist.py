@@ -38,6 +38,61 @@ class AutomaticTemplateSelection:
     quality_score: float
 
 
+@dataclass(frozen=True)
+class TemplateMaskQuality:
+    valid: bool
+    coverage: float
+    component_count: int
+    main_component_ratio: float
+    touches_border: bool
+    message: str
+
+
+def analyze_template_mask(mask: np.ndarray) -> TemplateMaskQuality:
+    """Evaluate whether a manually or automatically prepared mask is usable."""
+
+    candidate = np.asarray(mask)
+    if candidate.ndim == 3:
+        candidate = candidate[:, :, 0]
+    if candidate.ndim != 2 or candidate.size == 0:
+        return TemplateMaskQuality(False, 0.0, 0, 0.0, False, "Mask为空或尺寸无效")
+    binary = np.where(candidate > 0, 255, 0).astype(np.uint8)
+    foreground = int(np.count_nonzero(binary))
+    coverage = foreground / float(binary.size)
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    areas = sorted(
+        (int(stats[index, cv2.CC_STAT_AREA]) for index in range(1, count) if stats[index, cv2.CC_STAT_AREA] >= 25),
+        reverse=True,
+    )
+    component_count = len(areas)
+    main_ratio = (areas[0] / foreground) if areas and foreground else 0.0
+    touches_border = bool(
+        np.any(binary[0]) or np.any(binary[-1]) or np.any(binary[:, 0]) or np.any(binary[:, -1])
+    )
+    issues: list[str] = []
+    if foreground < 25:
+        issues.append("有效像素过少")
+    if coverage < 0.02:
+        issues.append("目标覆盖率过低")
+    elif coverage > 0.95:
+        issues.append("Mask几乎覆盖整个ROI")
+    if component_count > 1 and main_ratio < 0.92:
+        issues.append(f"存在{component_count}个明显分离区域")
+    if touches_border:
+        issues.append("目标接触ROI边界")
+    valid = (
+        foreground >= 25
+        and 0.02 <= coverage <= 0.95
+        and (component_count <= 1 or main_ratio >= 0.92)
+        and not touches_border
+    )
+    if issues:
+        message = "；".join(issues)
+    else:
+        message = f"Mask质量正常，覆盖率{coverage:.1%}，主体占比{main_ratio:.1%}"
+    return TemplateMaskQuality(valid, coverage, component_count, main_ratio, touches_border, message)
+
+
 def _kernel(image: np.ndarray) -> np.ndarray:
     size = max(3, int(round(min(image.shape[:2]) * 0.025)))
     if size % 2 == 0:
