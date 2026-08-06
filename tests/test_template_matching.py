@@ -34,6 +34,39 @@ def test_template_save_and_load(tmp_path):
     assert np.array_equal(loaded.mask, model.mask)
 
 
+def test_template_save_does_not_persist_absolute_source_path(tmp_path):
+    source = np.zeros((60, 80, 3), np.uint8)
+    source[10:50, 15:65] = 255
+    model = TemplateModel.from_roi(
+        source,
+        (15, 10, 50, 40),
+        "private-path-target",
+        r"D:\\private\\camera-images\\reference.jpg",
+    )
+
+    metadata = model.save(tmp_path / "private-path.json")
+    loaded = TemplateModel.load(metadata)
+
+    assert loaded.source_image == "reference.jpg"
+    assert "D:\\private" not in metadata.read_text(encoding="utf-8")
+
+
+def test_template_from_roi_can_tighten_mask_and_preserve_global_roi():
+    source = np.zeros((100, 140, 3), np.uint8)
+    source[40:60, 65:90] = 220
+    mask = np.zeros((60, 100), np.uint8)
+    mask[20:40, 35:60] = 255
+
+    model = TemplateModel.from_roi(
+        source, (30, 20, 100, 60), "tight", mask=mask,
+        tighten_mask=True, padding_ratio=0.0,
+    )
+
+    assert model.image.shape[:2] == (26, 31)
+    assert model.roi_xywh == (62, 37, 31, 26)
+    assert np.count_nonzero(model.mask) == 500
+
+
 def test_irregular_mask_center_and_persistence(tmp_path):
     image = asymmetric_template()
     mask = np.zeros(image.shape[:2], np.uint8)
@@ -237,3 +270,45 @@ def test_dark_textile_mode_rejects_large_smooth_border_background(monkeypatch):
     monkeypatch.setattr(matcher, "_pose_candidate_mask", lambda _image: false_component)
 
     assert matcher.match(scene) == []
+
+
+def test_large_generic_search_uses_coarse_to_fine_grid():
+    image = np.zeros((48, 72, 3), np.uint8)
+    cv2.rectangle(image, (5, 6), (62, 16), (220, 220, 220), -1)
+    cv2.rectangle(image, (5, 6), (16, 41), (220, 220, 220), -1)
+    cv2.circle(image, (28, 11), 4, (70, 70, 70), -1)
+    model = TemplateModel("coarse", image)
+    scaled = cv2.resize(image, None, fx=1.1, fy=1.1, interpolation=cv2.INTER_LINEAR)
+    rotated = _rotate_expanded(scaled, 38, 0)
+    scene = np.zeros((220, 320, 3), np.uint8)
+    top, left = 70, 100
+    scene[top : top + rotated.shape[0], left : left + rotated.shape[1]] = rotated
+    parameters = MatchParameters(
+        score_threshold=0.62,
+        angle_min=-180,
+        angle_max=178,
+        angle_step=2,
+        scale_min=0.5,
+        scale_max=1.8,
+        scale_step=0.05,
+        use_edges=True,
+        feature_mode="edges",
+        coarse_trigger_transforms=200,
+        refine_transform_limit=8,
+        max_results=2,
+    )
+    matcher = TemplateMatcher(model, parameters)
+    scan_sizes = []
+    original_scan = matcher._scan_variants
+
+    def record_scan(scene_image, variants, *args, **kwargs):
+        scan_sizes.append(len(variants))
+        return original_scan(scene_image, variants, *args, **kwargs)
+
+    matcher._scan_variants = record_scan
+    matches = matcher.match(scene)
+    assert matches
+    best = max(matches, key=lambda item: item.score)
+    assert abs(best.angle_deg - 38) <= 4
+    assert len(scan_sizes) == 2
+    assert sum(scan_sizes) < 2000

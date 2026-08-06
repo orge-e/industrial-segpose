@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime
 from pathlib import Path
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import cv2
 import numpy as np
 
 from . import __version__
+from .camera import OpenCVCameraSource
 from .io.image_reader import read_image
+from .k230_workbench import (
+    K230CaptureImage,
+    build_workbench_deployment,
+    scan_k230_captures,
+    validate_workbench_images,
+)
+from .runtime import ConveyorSession, ConveyorFrameResult, draw_conveyor_frame
 from .template_matching import (
     METHOD_LABELS,
     MatchParameters,
@@ -23,12 +32,14 @@ from .template_matching import (
     RecognizedObject,
     TemplateLibrary,
     TemplateModel,
+    analyze_template_mask,
     build_assisted_mask,
     locate_assisted_template,
     draw_multi_template_matches,
     write_multi_template_result,
 )
 from .template_demo import prepare_template_demo
+from .tracking import TrackingConfig
 
 
 IMAGE_TYPES = [("图像文件", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("所有文件", "*.*")]
@@ -82,12 +93,13 @@ class ImageCanvas(tk.Canvas):
             self.bind("<B1-Motion>", self._drag)
             self.bind("<ButtonRelease-1>", self._release)
 
-    def set_image(self, image: np.ndarray | None, clear_roi: bool = True) -> None:
+    def set_image(self, image: np.ndarray | None, clear_roi: bool = True, reset_view: bool = True) -> None:
         self.image = image.copy() if image is not None else None
         if clear_roi:
             self.roi = None
-        self.zoom_factor = 1.0
-        self.pan_x = self.pan_y = 0.0
+        if reset_view:
+            self.zoom_factor = 1.0
+            self.pan_x = self.pan_y = 0.0
         self._render()
 
     def zoom_in(self) -> None:
@@ -433,6 +445,11 @@ class TemplateParameterDialog(tk.Toplevel):
                 feature_mode=self.feature_label_to_mode.get(self.feature_mode_var.get(), "auto"),
                 max_candidates_per_transform=self.original.max_candidates_per_transform,
                 max_results=self.original.max_results,
+                coarse_to_fine=self.original.coarse_to_fine,
+                coarse_trigger_transforms=self.original.coarse_trigger_transforms,
+                coarse_angle_step=self.original.coarse_angle_step,
+                coarse_scale_step=self.original.coarse_scale_step,
+                refine_transform_limit=self.original.refine_transform_limit,
             )
             self.result.validate()
         except (ValueError, tk.TclError) as exc:
@@ -444,7 +461,7 @@ class TemplateParameterDialog(tk.Toplevel):
 class TemplateMatchingApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Industrial SegPose - 图像模板匹配")
+        self.title("FlexPose Vision - 柔性工件定位系统")
         self.geometry("1280x820")
         self.minsize(980, 650)
         self.reference_path: Path | None = None
@@ -463,8 +480,17 @@ class TemplateMatchingApp(tk.Tk):
         except Exception as exc:
             self.library_load_error = str(exc)
         self.worker_queue: queue.Queue = queue.Queue()
+        self.live_queue: queue.Queue = queue.Queue(maxsize=3)
+        self.live_source: OpenCVCameraSource | None = None
+        self.live_session: ConveyorSession | None = None
+        self.live_stop_event = threading.Event()
+        self.live_frame_lock = threading.Lock()
+        self.live_latest_frame: np.ndarray | None = None
+        self.live_frame_sequence = 0
+        self.live_running = False
         self._configure_style()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -498,17 +524,20 @@ class TemplateMatchingApp(tk.Tk):
     def _build_ui(self) -> None:
         header = ttk.Frame(self, padding=(20, 14), style="Header.TFrame")
         header.pack(fill="x")
-        ttk.Label(header, text="Industrial Vision Studio", style="HeaderTitle.TLabel").pack(side="left")
+        ttk.Label(header, text="FlexPose Vision", style="HeaderTitle.TLabel").pack(side="left")
         ttk.Label(header, text="纺织工件 · 模板建立 · 多目标识别定位计数", style="HeaderSub.TLabel").pack(side="left", padx=20, pady=(6, 0))
         ttk.Label(header, text=f"v{__version__}", style="HeaderSub.TLabel").pack(side="right", pady=(6, 0))
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.template_tab = ttk.Frame(self.notebook, padding=8)
         self.detect_tab = ttk.Frame(self.notebook, padding=8)
+        self.live_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(self.template_tab, text=" 1. 建立模板 ")
         self.notebook.add(self.detect_tab, text=" 2. 模板检测 ")
+        self.notebook.add(self.live_tab, text=" 3. 实时生产 ")
         self._build_template_tab()
         self._build_detect_tab()
+        self._build_live_tab()
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(12, 6), background="#E8EEF7", foreground="#40516D").pack(fill="x")
         self._refresh_library_tree()
@@ -524,17 +553,20 @@ class TemplateMatchingApp(tk.Tk):
         ttk.Label(sidebar, text="建立工件模板", style="Section.TLabel").pack(anchor="w", pady=(0, 4))
         ttk.Label(sidebar, text="按步骤完成图像加载、轮廓提取和入库。", style="Hint.TLabel", wraplength=255).pack(anchor="w", pady=(0, 18))
         ttk.Label(sidebar, text="01  加载基准图像", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
+        ttk.Button(sidebar, text="K230采集图像 / 模板工作台", command=self.open_k230_workbench, style="Primary.TButton").pack(fill="x", pady=(0, 6))
         ttk.Button(sidebar, text="＋ 导入并自动绘制", command=lambda: self.load_reference(auto_extract=True), style="Primary.TButton").pack(fill="x", pady=(0, 6))
         ttk.Button(sidebar, text="仅加载 / 手动框选", command=self.load_reference, style="Secondary.TButton").pack(fill="x", pady=(0, 18))
         ttk.Separator(sidebar).pack(fill="x", pady=(0, 16))
         ttk.Label(sidebar, text="02  设置工件信息", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
         ttk.Label(sidebar, text="模板名称", style="Hint.TLabel").pack(anchor="w")
-        self.template_name_var = tk.StringVar(value="target")
+        self.template_name_var = tk.StringVar(value="")
         ttk.Entry(sidebar, textvariable=self.template_name_var).pack(fill="x", pady=(4, 12))
         self.roi_var = tk.StringVar(value="请加载图像并拖动鼠标框选一个目标")
         ttk.Label(sidebar, textvariable=self.roi_var, style="Hint.TLabel", wraplength=255).pack(anchor="w", pady=(0, 15))
         ttk.Label(sidebar, text="03  提取不规则轮廓", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
         ttk.Button(sidebar, text="编辑 / 算法辅助提取", command=self.edit_template_shape, style="Secondary.TButton").pack(fill="x", pady=(0, 18))
+        self.template_quality_var = tk.StringVar(value="Mask质量：尚未建立")
+        ttk.Label(sidebar, textvariable=self.template_quality_var, style="Hint.TLabel", wraplength=255, justify="left").pack(anchor="w", pady=(0, 14))
         ttk.Separator(sidebar).pack(fill="x", pady=(0, 16))
         ttk.Label(sidebar, text="04  保存到模板库", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
         ttk.Button(sidebar, text="保存并加入模板库", command=self.save_template, style="Primary.TButton").pack(fill="x")
@@ -559,6 +591,7 @@ class TemplateMatchingApp(tk.Tk):
         ttk.Button(top, text="＋ 导入模板", command=self.import_template, style="Primary.TButton").pack(side="left")
         ttk.Button(top, text="启用/停用", command=self.toggle_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
         ttk.Button(top, text="编辑参数", command=self.edit_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
+        ttk.Button(top, text="重命名类型", command=self.rename_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
         ttk.Button(top, text="移出模板库", command=self.remove_selected_template, style="Danger.TButton").pack(side="left", padx=4)
         ttk.Button(top, text="重新加载", command=self.reload_library, style="Secondary.TButton").pack(side="left", padx=4)
         self.demo_button = ttk.Button(top, text="合成自检", command=self.load_demo_case, style="Secondary.TButton")
@@ -638,25 +671,92 @@ class TemplateMatchingApp(tk.Tk):
         self.result_tree.pack(side="left", fill="both", expand=True, padx=(8, 0))
         scrollbar.pack(side="right", fill="y")
 
+    def _build_live_tab(self) -> None:
+        controls = ttk.LabelFrame(self.live_tab, text="相机 / 视频源与计数设置", padding=8, style="Card.TLabelframe")
+        controls.pack(fill="x", pady=(0, 7))
+        ttk.Label(controls, text="视频源（相机编号或文件）").grid(row=0, column=0, padx=4, sticky="w")
+        self.live_source_var = tk.StringVar(value="0")
+        ttk.Entry(controls, textvariable=self.live_source_var, width=28).grid(row=1, column=0, padx=4, sticky="ew")
+        ttk.Button(controls, text="选择视频", command=self._browse_live_source, style="Secondary.TButton").grid(row=1, column=1, padx=4)
+        ttk.Label(controls, text="计数线方向").grid(row=0, column=2, padx=4)
+        self.live_axis_var = tk.StringVar(value="竖线（从左到右）")
+        ttk.Combobox(controls, textvariable=self.live_axis_var, values=("竖线（从左到右）", "横线（从上到下）"), state="readonly", width=16).grid(row=1, column=2, padx=4)
+        ttk.Label(controls, text="位置比例").grid(row=0, column=3, padx=4)
+        self.live_line_position_var = tk.StringVar(value="0.50")
+        ttk.Entry(controls, textvariable=self.live_line_position_var, width=8).grid(row=1, column=3, padx=4)
+        ttk.Label(controls, text="计数方向").grid(row=0, column=4, padx=4)
+        self.live_direction_var = tk.StringVar(value="正向")
+        ttk.Combobox(controls, textvariable=self.live_direction_var, values=("正向", "反向", "双向"), state="readonly", width=8).grid(row=1, column=4, padx=4)
+        self.live_quality_gate_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(controls, text="质量不合格时跳过检测", variable=self.live_quality_gate_var).grid(row=1, column=5, padx=7)
+        self.live_start_button = ttk.Button(controls, text="▶ 启动实时检测", command=self.start_live_detection, style="Primary.TButton")
+        self.live_start_button.grid(row=0, column=6, rowspan=2, padx=5)
+        self.live_stop_button = ttk.Button(controls, text="■ 停止", command=self.stop_live_detection, state="disabled", style="Danger.TButton")
+        self.live_stop_button.grid(row=0, column=7, rowspan=2, padx=5)
+        ttk.Button(controls, text="清零累计", command=self.reset_live_counts, style="Secondary.TButton").grid(row=0, column=8, rowspan=2, padx=5)
+        controls.columnconfigure(0, weight=1)
+
+        pane = ttk.Panedwindow(self.live_tab, orient="horizontal")
+        pane.pack(fill="both", expand=True)
+        image_frame = ttk.Frame(pane, padding=8, style="Card.TFrame")
+        dashboard = ttk.Frame(pane, padding=12, style="Card.TFrame")
+        pane.add(image_frame, weight=4)
+        pane.add(dashboard, weight=2)
+        toolbar = ttk.Frame(image_frame, style="Card.TFrame")
+        toolbar.pack(fill="x", pady=(0, 6))
+        ttk.Label(toolbar, text="实时画面｜黄色线为计数线", style="Hint.TLabel").pack(side="left")
+        self.live_canvas = ImageCanvas(image_frame)
+        ttk.Button(toolbar, text="放大 ＋", command=self.live_canvas.zoom_in, style="Secondary.TButton").pack(side="right", padx=(4, 0))
+        ttk.Button(toolbar, text="缩小 －", command=self.live_canvas.zoom_out, style="Secondary.TButton").pack(side="right", padx=(4, 0))
+        ttk.Button(toolbar, text="适应窗口", command=self.live_canvas.fit_to_window, style="Secondary.TButton").pack(side="right")
+        self.live_canvas.pack(fill="both", expand=True)
+
+        self.live_count_var = tk.StringVar(value="累计计数：0")
+        self.live_breakdown_var = tk.StringVar(value="分类计数：-")
+        self.live_quality_var = tk.StringVar(value="画面质量：未启动")
+        self.live_performance_var = tk.StringVar(value="处理耗时：-")
+        ttk.Label(dashboard, textvariable=self.live_count_var, style="Title.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(dashboard, textvariable=self.live_breakdown_var, style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        ttk.Label(dashboard, textvariable=self.live_quality_var, style="Hint.TLabel", wraplength=360).pack(anchor="w", pady=(0, 4))
+        ttk.Label(dashboard, textvariable=self.live_performance_var, style="Hint.TLabel").pack(anchor="w", pady=(0, 12))
+        columns = ("track", "template", "x", "y", "angle", "counted")
+        self.live_tree = ttk.Treeview(dashboard, columns=columns, show="headings", height=15)
+        labels = {"track": "轨迹", "template": "类型", "x": "中心X", "y": "中心Y", "angle": "角度°", "counted": "计数"}
+        widths = {"track": 55, "template": 100, "x": 70, "y": 70, "angle": 70, "counted": 55}
+        for column in columns:
+            self.live_tree.heading(column, text=labels[column])
+            self.live_tree.column(column, width=widths[column], anchor="center")
+        self.live_tree.pack(fill="both", expand=True)
+
     def _roi_changed(self, _event=None) -> None:
         roi = self.reference_canvas.roi
         self.template_mask = None
+        self.template_quality_var.set("Mask质量：ROI已改变，请重新提取轮廓")
         self.roi_var.set(f"ROI: x={roi[0]}, y={roi[1]}, w={roi[2]}, h={roi[3]}" if roi else "未选择 ROI")
 
     def load_reference(self, auto_extract: bool = False) -> None:
         path = filedialog.askopenfilename(title="选择参考图像", filetypes=IMAGE_TYPES)
         if not path:
             return
+        self.load_reference_path(path, auto_extract=auto_extract)
+
+    def load_reference_path(self, path: str | Path, auto_extract: bool = False) -> None:
+        """Load a reference selected by a file dialog or the K230 workbench."""
+
         try:
             self.reference_image = read_image(path)
             self.reference_path = Path(path)
             self.template_mask = None
+            self.template_quality_var.set("Mask质量：尚未建立")
             self.reference_canvas.set_image(self.reference_image)
             self.status_var.set(f"已加载参考图像：{path}")
             if auto_extract:
                 self.after(80, self.auto_locate_template)
         except Exception as exc:
             messagebox.showerror("加载失败", str(exc), parent=self)
+
+    def open_k230_workbench(self) -> None:
+        K230TemplateWorkbench(self)
 
     def auto_locate_template(self) -> None:
         if self.reference_image is None:
@@ -678,8 +778,9 @@ class TemplateMatchingApp(tk.Tk):
             self.wait_window(dialog)
             if dialog.result is not None:
                 self.template_mask = dialog.result
-                coverage = np.count_nonzero(self.template_mask) / self.template_mask.size
-                self.roi_var.set(f"自动模板已确认，有效区域 {coverage:.1%}（ROI {width} x {height}）")
+                quality = analyze_template_mask(self.template_mask)
+                self.roi_var.set(f"自动模板已确认，有效区域 {quality.coverage:.1%}（ROI {width} x {height}）")
+                self.template_quality_var.set(f"Mask质量：{quality.message}")
                 self.status_var.set("自动模板绘制完成，可设置名称并保存到模板库")
             else:
                 self.status_var.set("已取消自动模板编辑，仍可手动框选")
@@ -702,20 +803,51 @@ class TemplateMatchingApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.result is not None:
             self.template_mask = dialog.result
-            coverage = np.count_nonzero(self.template_mask) / self.template_mask.size
-            self.roi_var.set(f"不规则模板已标注，有效区域 {coverage:.1%}（ROI {width} x {height}）")
+            quality = analyze_template_mask(self.template_mask)
+            self.roi_var.set(f"不规则模板已标注，有效区域 {quality.coverage:.1%}（ROI {width} x {height}）")
+            self.template_quality_var.set(f"Mask质量：{quality.message}")
 
     def save_template(self) -> None:
         if self.reference_image is None or not self.reference_canvas.roi:
             messagebox.showwarning("缺少选区", "请先加载参考图像并框选目标。", parent=self)
             return
+        name = self.template_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("缺少模板名称", "请填写能表示工件类别的模板名称，例如 Pink_Textile_01。", parent=self)
+            return
+        if len(name) > 48:
+            messagebox.showwarning("名称过长", "模板名称最多48个字符。", parent=self)
+            return
+        if name.casefold() in {"t1", "target", "template", "object"}:
+            if not messagebox.askyesno(
+                "名称过于笼统",
+                f"模板名称“{name}”不利于分类和现场调试，建议改成明确工件类型。\n\n仍要继续保存吗？",
+                parent=self,
+            ):
+                return
+        if self.template_mask is None:
+            if not messagebox.askyesno(
+                "尚未提取轮廓",
+                "当前将使用整个矩形ROI作为模板，可能包含较多背景。\n建议先点击“编辑 / 算法辅助提取”。\n\n仍要继续保存吗？",
+                parent=self,
+            ):
+                return
+        else:
+            quality = analyze_template_mask(self.template_mask)
+            if not quality.valid and not messagebox.askyesno(
+                "Mask质量警告",
+                quality.message + "。这可能降低定位和分类稳定性。\n\n仍要继续保存吗？",
+                parent=self,
+            ):
+                return
         try:
             model = TemplateModel.from_roi(
                 self.reference_image,
                 self.reference_canvas.roi,
-                self.template_name_var.get(),
+                name,
                 str(self.reference_path) if self.reference_path else None,
                 self.template_mask,
+                tighten_mask=self.template_mask is not None,
             )
         except Exception as exc:
             messagebox.showerror("模板无效", str(exc), parent=self)
@@ -727,8 +859,13 @@ class TemplateMatchingApp(tk.Tk):
             self._invalidate_matcher()
             self._refresh_library_tree(select_id=entry.template_id)
             saved = self.template_library.root / entry.template_file
-            self.status_var.set(f"模板已加入模板库：{model.name}")
-            messagebox.showinfo("模板已建立", f"模板已保存并加入模板库：\n{saved}", parent=self)
+            model_height, model_width = model.image.shape[:2]
+            self.status_var.set(f"模板已加入模板库：{model.name}（紧裁剪 {model_width}x{model_height}）")
+            messagebox.showinfo(
+                "模板已建立",
+                f"工件类型：{model.name}\n有效模板尺寸：{model_width} x {model_height}\n\n已保存并加入模板库：\n{saved}",
+                parent=self,
+            )
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc), parent=self)
 
@@ -810,6 +947,28 @@ class TemplateMatchingApp(tk.Tk):
             self._invalidate_matcher()
             self._refresh_library_tree(select_id=template_id)
             self.status_var.set(f"已更新模板参数：{entry.name}")
+
+    def rename_selected_template(self) -> None:
+        template_id = self._selected_template_id()
+        if not template_id:
+            messagebox.showwarning("未选择模板", "请先在模板库中选择一个工件类型。", parent=self)
+            return
+        entry = self.template_library.get(template_id)
+        name = simpledialog.askstring(
+            "重命名工件类型",
+            "请输入用于检测界面和分类输出的模板名称：",
+            initialvalue=entry.name,
+            parent=self,
+        )
+        if name is None:
+            return
+        try:
+            self.template_library.rename(template_id, name)
+            self._invalidate_matcher()
+            self._refresh_library_tree(select_id=template_id)
+            self.status_var.set(f"工件类型已重命名：{name.strip()}")
+        except Exception as exc:
+            messagebox.showerror("重命名失败", str(exc), parent=self)
 
     def remove_selected_template(self) -> None:
         template_id = self._selected_template_id()
@@ -942,6 +1101,184 @@ class TemplateMatchingApp(tk.Tk):
         breakdown = "，".join(f"{name}:{count}" for name, count in self.multi_result.counts_by_template.items())
         self.count_var.set(f"总数：{len(matches)}  待确认：{self.multi_result.ambiguous_count}" + (f"  {breakdown}" if breakdown else ""))
 
+    def _browse_live_source(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.wmv"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.live_source_var.set(path)
+
+    def _live_tracking_config(self) -> TrackingConfig:
+        axis = "x" if self.live_axis_var.get().startswith("竖线") else "y"
+        direction = {"正向": "positive", "反向": "negative", "双向": "both"}[self.live_direction_var.get()]
+        config = TrackingConfig(
+            line_axis=axis,
+            line_position=float(self.live_line_position_var.get()),
+            direction=direction,
+        )
+        config.validate()
+        return config
+
+    def start_live_detection(self) -> None:
+        if self.live_running:
+            return
+        try:
+            matcher = MultiTemplateMatcher.from_library(self.template_library)
+            if matcher.valid_enabled_count == 0:
+                raise ValueError("模板库中没有有效且已启用的模板")
+            tracking_config = self._live_tracking_config()
+            source = OpenCVCameraSource.from_text(self.live_source_var.get())
+            source.open()
+        except Exception as exc:
+            messagebox.showerror("实时检测无法启动", str(exc), parent=self)
+            return
+        self.live_source = source
+        self.live_session = ConveyorSession(
+            matcher,
+            tracking_config=tracking_config,
+            reject_bad_frames=self.live_quality_gate_var.get(),
+        )
+        self.live_stop_event.clear()
+        with self.live_frame_lock:
+            self.live_latest_frame = None
+            self.live_frame_sequence = 0
+        while not self.live_queue.empty():
+            try:
+                self.live_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.live_running = True
+        self.live_start_button.configure(state="disabled")
+        self.live_stop_button.configure(state="normal")
+        self.status_var.set(f"实时检测已启动：{self.live_source_var.get()}")
+
+        def capture_worker() -> None:
+            frame_interval = 0.0
+            if isinstance(source.source, str) and source.capture is not None:
+                fps = float(source.capture.get(cv2.CAP_PROP_FPS))
+                if 1.0 <= fps <= 240.0:
+                    frame_interval = 1.0 / fps
+            try:
+                while not self.live_stop_event.is_set():
+                    frame = source.read()
+                    with self.live_frame_lock:
+                        self.live_latest_frame = frame
+                        self.live_frame_sequence += 1
+                    if frame_interval and self.live_stop_event.wait(frame_interval):
+                        break
+            except EOFError:
+                self._put_live_event(("stopped", "视频播放结束"))
+                self.live_stop_event.set()
+            except Exception as exc:
+                if not self.live_stop_event.is_set():
+                    self._put_live_event(("error", exc))
+                    self.live_stop_event.set()
+
+        def detection_worker() -> None:
+            last_sequence = -1
+            try:
+                while not self.live_stop_event.is_set():
+                    with self.live_frame_lock:
+                        sequence = self.live_frame_sequence
+                        frame = None if self.live_latest_frame is None else self.live_latest_frame.copy()
+                    if frame is None or sequence == last_sequence:
+                        self.live_stop_event.wait(0.01)
+                        continue
+                    last_sequence = sequence
+                    result = self.live_session.process_frame(frame)
+                    annotated = draw_conveyor_frame(frame, result, tracking_config)
+                    self._put_live_event(("frame", result, annotated))
+            except Exception as exc:
+                if not self.live_stop_event.is_set():
+                    self._put_live_event(("error", exc))
+                    self.live_stop_event.set()
+
+        threading.Thread(target=capture_worker, daemon=True, name="camera-capture").start()
+        threading.Thread(target=detection_worker, daemon=True, name="continuous-detection").start()
+        self.after(60, self._poll_live_queue)
+
+    def _put_live_event(self, event: tuple) -> None:
+        try:
+            self.live_queue.put_nowait(event)
+        except queue.Full:
+            try:
+                self.live_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.live_queue.put_nowait(event)
+
+    def _poll_live_queue(self) -> None:
+        events: list[tuple] = []
+        while True:
+            try:
+                events.append(self.live_queue.get_nowait())
+            except queue.Empty:
+                break
+        for event in events:
+            if event[0] == "frame":
+                self._update_live_dashboard(event[1], event[2])
+            elif event[0] == "error":
+                self.stop_live_detection(status="实时检测失败")
+                messagebox.showerror("实时检测失败", str(event[1]), parent=self)
+                return
+            elif event[0] == "stopped":
+                self.stop_live_detection(status=str(event[1]))
+                return
+        if self.live_running:
+            self.after(60, self._poll_live_queue)
+
+    def _update_live_dashboard(self, result: ConveyorFrameResult, annotated: np.ndarray) -> None:
+        self.live_canvas.set_image(annotated, reset_view=False)
+        self.live_tree.delete(*self.live_tree.get_children())
+        for item in result.tracking.observations:
+            self.live_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"T{item.track_id}", item.template_name, f"{item.center_x:.1f}",
+                    f"{item.center_y:.1f}", f"{item.angle_deg:.1f}", "新计数" if item.counted_now else ("已计" if item.counted else "-"),
+                ),
+            )
+        counts = result.tracking.counts_by_template
+        breakdown = "，".join(f"{name}:{count}" for name, count in counts.items()) or "-"
+        self.live_count_var.set(f"累计计数：{result.tracking.cumulative_total}")
+        self.live_breakdown_var.set(f"分类计数：{breakdown}")
+        issue_labels = {
+            "underexposed": "欠曝", "overexposed": "过曝", "blurred": "模糊",
+            "uneven_illumination": "光照不均",
+        }
+        quality = "正常" if result.quality.passed else "、".join(issue_labels.get(item, item) for item in result.quality.issues)
+        self.live_quality_var.set(
+            f"画面质量：{quality}｜亮度 {result.quality.mean_brightness:.1f}｜清晰度 {result.quality.sharpness:.1f}"
+        )
+        self.live_performance_var.set(
+            f"处理耗时：{result.elapsed_ms:.0f} ms｜活动轨迹：{result.tracking.active_track_count}"
+            + ("｜本帧已跳过" if result.skipped else "")
+        )
+
+    def reset_live_counts(self) -> None:
+        if self.live_session is not None:
+            self.live_session.reset_counts()
+        self.live_count_var.set("累计计数：0")
+        self.live_breakdown_var.set("分类计数：-")
+        self.status_var.set("实时累计计数已清零")
+
+    def stop_live_detection(self, status: str = "实时检测已停止") -> None:
+        self.live_stop_event.set()
+        source, self.live_source = self.live_source, None
+        if source is not None:
+            source.close()
+        self.live_running = False
+        if hasattr(self, "live_start_button"):
+            self.live_start_button.configure(state="normal")
+            self.live_stop_button.configure(state="disabled")
+        self.status_var.set(status)
+
+    def _on_close(self) -> None:
+        self.stop_live_detection()
+        self.destroy()
+
     def save_results(self) -> None:
         if self.annotated_image is None or self.detection_path is None or self.multi_result is None:
             return
@@ -956,6 +1293,177 @@ class TemplateMatchingApp(tk.Tk):
             messagebox.showerror("保存失败", str(exc), parent=self)
 
 
+class K230TemplateWorkbench(tk.Toplevel):
+    """Desktop authoring bridge for images captured by a K230 module."""
+
+    def __init__(self, parent: "TemplateMatchingApp"):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("K230采集图像与模板工作台")
+        self.geometry("1120x720")
+        self.minsize(900, 600)
+        self.transient(parent)
+        self.captures: list[K230CaptureImage] = []
+        self.source_var = tk.StringVar(value=str(parent.data_root / "captures"))
+        self.summary_var = tk.StringVar(value="选择K230的SD卡、industrial_vision目录或已复制的captures目录")
+        self._build()
+
+    def _build(self) -> None:
+        header = ttk.Frame(self, padding=14, style="Header.TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, text="K230 模板工作台", style="HeaderTitle.TLabel").pack(side="left")
+        ttk.Label(
+            header,
+            text="采集图像 → 自动分割/人工修正 → 批量回放 → 部署包",
+            style="HeaderSub.TLabel",
+        ).pack(side="left", padx=18, pady=(6, 0))
+
+        source = ttk.Frame(self, padding=(12, 10), style="Card.TFrame")
+        source.pack(fill="x", padx=10, pady=10)
+        ttk.Label(source, text="采集目录", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Entry(source, textvariable=self.source_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(source, text="浏览", command=self._browse, style="Secondary.TButton").pack(side="left", padx=6)
+        ttk.Button(source, text="扫描图像", command=self._scan, style="Primary.TButton").pack(side="left")
+
+        pane = ttk.Panedwindow(self, orient="horizontal")
+        pane.pack(fill="both", expand=True, padx=10)
+        list_card = ttk.Frame(pane, padding=8, style="Card.TFrame")
+        preview_card = ttk.Frame(pane, padding=8, style="Card.TFrame")
+        pane.add(list_card, weight=3)
+        pane.add(preview_card, weight=4)
+
+        ttk.Label(list_card, text="采集图像（可多选用于验证）", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        columns = ("session", "file", "dimensions", "size")
+        self.tree = ttk.Treeview(list_card, columns=columns, show="headings", selectmode="extended")
+        labels = {"session": "批次", "file": "文件", "dimensions": "尺寸", "size": "大小"}
+        widths = {"session": 100, "file": 180, "dimensions": 90, "size": 75}
+        for column in columns:
+            self.tree.heading(column, text=labels[column])
+            self.tree.column(column, width=widths[column], anchor="center")
+        scroll = ttk.Scrollbar(list_card, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._show_selected)
+
+        preview_header = ttk.Frame(preview_card, style="Card.TFrame")
+        preview_header.pack(fill="x", pady=(0, 6))
+        ttk.Label(preview_header, text="图像预览", style="Section.TLabel").pack(side="left")
+        self.preview_canvas = ImageCanvas(preview_card)
+        ttk.Button(preview_header, text="放大 ＋", command=self.preview_canvas.zoom_in, style="Secondary.TButton").pack(side="right", padx=3)
+        ttk.Button(preview_header, text="缩小 －", command=self.preview_canvas.zoom_out, style="Secondary.TButton").pack(side="right", padx=3)
+        ttk.Button(preview_header, text="适应窗口", command=self.preview_canvas.fit_to_window, style="Secondary.TButton").pack(side="right")
+        self.preview_canvas.pack(fill="both", expand=True)
+
+        actions = ttk.Frame(self, padding=10, style="Card.TFrame")
+        actions.pack(fill="x", padx=10, pady=10)
+        ttk.Button(actions, text="① 设为基准图并自动分割", command=self._use_as_reference, style="Primary.TButton").pack(side="left")
+        ttk.Button(actions, text="② 批量验证所选图像", command=self._validate_selected, style="Secondary.TButton").pack(side="left", padx=6)
+        ttk.Button(actions, text="③ 生成完整K230部署包", command=self._build_deployment, style="Primary.TButton").pack(side="left")
+        ttk.Label(actions, textvariable=self.summary_var, style="Hint.TLabel", wraplength=430).pack(side="right")
+
+    def _browse(self) -> None:
+        path = filedialog.askdirectory(title="选择K230采集目录或SD卡根目录", initialdir=self.source_var.get())
+        if path:
+            self.source_var.set(path)
+            self._scan()
+
+    def _scan(self) -> None:
+        try:
+            self.captures = scan_k230_captures(self.source_var.get())
+            self.tree.delete(*self.tree.get_children())
+            for index, capture in enumerate(self.captures):
+                self.tree.insert(
+                    "", "end", iid=str(index),
+                    values=(capture.session, capture.path.name, capture.dimensions, f"{capture.size_bytes / 1024:.0f} KB"),
+                )
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+            self._show_selected()
+            self.summary_var.set(f"已读取 {len(self.captures)} 张图像；文件保持在原目录，不复制进部署包")
+        except Exception as exc:
+            messagebox.showerror("扫描失败", str(exc), parent=self)
+
+    def _selected_captures(self) -> list[K230CaptureImage]:
+        return [self.captures[int(item)] for item in self.tree.selection() if item.isdigit()]
+
+    def _show_selected(self, _event=None) -> None:
+        selected = self._selected_captures()
+        if not selected:
+            return
+        try:
+            self.preview_canvas.set_image(read_image(selected[0].path))
+            self.summary_var.set(str(selected[0].path))
+        except Exception as exc:
+            self.summary_var.set(f"预览失败：{exc}")
+
+    def _use_as_reference(self) -> None:
+        selected = self._selected_captures()
+        if not selected:
+            messagebox.showwarning("未选择图像", "请先选择一张采集图像。", parent=self)
+            return
+        self.iconify()
+        self.parent.notebook.select(self.parent.template_tab)
+        self.parent.load_reference_path(selected[0].path, auto_extract=True)
+        self.parent.lift()
+
+    def _run_background(self, label: str, task, done) -> None:
+        self.summary_var.set(label)
+
+        def worker() -> None:
+            try:
+                result = task()
+                self.after(0, lambda: done(result, None))
+            except Exception as exc:
+                self.after(0, lambda exc=exc: done(None, exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_deployment(self) -> None:
+        output = self.parent.data_root / "build" / "k230_sdcard"
+
+        def done(result, error) -> None:
+            if error:
+                self.summary_var.set("部署包生成失败")
+                messagebox.showerror("生成失败", str(error), parent=self)
+                return
+            app_root, check = result
+            detail = f"已导出 {check.enabled_templates} 个有效模板"
+            if check.invalid_templates:
+                detail += f"，跳过 {len(check.invalid_templates)} 个异常模板"
+            self.summary_var.set(f"{detail}：{app_root}")
+            messagebox.showinfo("部署包已生成", f"{detail}\n\n复制此目录到SD卡：\n{app_root}", parent=self)
+
+        self._run_background(
+            "正在转换模板并生成部署包……",
+            lambda: build_workbench_deployment(self.parent.data_root, output),
+            done,
+        )
+
+    def _validate_selected(self) -> None:
+        selected = self._selected_captures()
+        if not selected:
+            messagebox.showwarning("未选择验证图像", "请在左侧选择一张或多张图像。", parent=self)
+            return
+        output = self.parent.data_root / "build" / "k230_sdcard"
+        report_root = self.parent.data_root / "reports" / "k230_workbench" / datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        def task():
+            app_root, check = build_workbench_deployment(self.parent.data_root, output)
+            report = validate_workbench_images(app_root, [item.path for item in selected], report_root)
+            return report, check
+
+        def done(result, error) -> None:
+            if error:
+                self.summary_var.set("批量验证失败")
+                messagebox.showerror("验证失败", str(error), parent=self)
+                return
+            report, check = result
+            self.summary_var.set(f"已用 {check.enabled_templates} 个模板验证 {len(selected)} 张图像：{report}")
+            messagebox.showinfo("验证完成", f"验证报告和标注预览已保存：\n{report.parent}", parent=self)
+
+        self._run_background("正在生成K230模板并批量回放……", task, done)
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Industrial SegPose template matching UI")
     parser.add_argument("--check", action="store_true", help="Create and close the UI for environment verification")
@@ -963,7 +1471,13 @@ def main(argv: list[str] | None = None) -> int:
     app = TemplateMatchingApp()
     if args.check:
         app.withdraw()
-        if not hasattr(app, "library_tree") or not hasattr(app, "demo_button") or not isinstance(app.template_library, TemplateLibrary):
+        if (
+            not hasattr(app, "library_tree")
+            or not hasattr(app, "demo_button")
+            or not hasattr(app, "live_canvas")
+            or not hasattr(app, "live_tree")
+            or not isinstance(app.template_library, TemplateLibrary)
+        ):
             raise RuntimeError("Template library UI check failed")
         editor = MaskEditorCanvas(app, np.zeros((40, 60, 3), dtype=np.uint8))
         editor.fill_all()

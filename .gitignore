@@ -10,6 +10,11 @@ samples/generated/
 reports/_qa/
 reports/_report_assets/
 reports/build_status_report.py
+reports/k230_*/
+reports/k230_workbench/
+vendor/yahboom_k230/
+k230_templates/
+backups/
 *.log
 .DS_Store
 Thumbs.db

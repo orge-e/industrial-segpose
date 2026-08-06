@@ -64,3 +64,25 @@ def test_library_reports_missing_template_without_blocking_others(tmp_path):
     bad = next(item for item in loaded if item.entry.template_id == missing.template_id)
     assert not bad.valid
     assert "does not exist" in bad.error
+
+
+def test_library_rename_updates_manifest_and_template_metadata(tmp_path):
+    library = TemplateLibrary(tmp_path / "templates")
+    entry = library.add_model(model("t1"))
+
+    library.rename(entry.template_id, "Pink_Textile_01")
+    reloaded = TemplateLibrary(library.root).load()
+    loaded = reloaded.load_entries()[0]
+
+    assert loaded.entry.template_id == entry.template_id
+    assert loaded.entry.name == "Pink_Textile_01"
+    assert loaded.model.name == "Pink_Textile_01"
+
+
+def test_library_rename_rejects_duplicate_name(tmp_path):
+    library = TemplateLibrary(tmp_path / "templates")
+    first = library.add_model(model("A"))
+    library.add_model(model("B"))
+
+    with pytest.raises(ValueError, match="already exists"):
+        library.rename(first.template_id, "B")
