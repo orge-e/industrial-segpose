@@ -43,6 +43,24 @@ industrial_vision/
 
 在 CanMV 中手动运行 `/sdcard/industrial_vision/main.py`。设备界面名称默认为 `FlexPose Vision｜柔性工件定位系统`，可在 `device_config.json` 的 `ui` 节点修改。检测页底部提供放大、缩小、适应画面、拍摄原图和刷新识别按钮。“刷新识别”只清除短时目标跟踪状态，不影响模板库，也不涉及累计计数。`template_authoring.enabled=true`时可进入板端调试建模；拍摄后只使用冻结帧，并可切换原图、分割Mask和叠加预览。
 
+每次在K230上成功保存模板后，程序会把完整分割中间过程写入以下目录，并在下一次建模时覆盖旧结果，避免长期占用SD卡：
+
+```text
+/sdcard/industrial_vision/diagnostics/latest_template/
+  00_frozen_frame.jpg
+  01_roi_original.bmp
+  10_candidate_00_assisted_roi.bmp
+  10_candidate_01_color.bmp ...
+  20_template_crop.bmp
+  21_final_mask.bmp
+  22_gray.bmp
+  23_edge.bmp
+  24_pose.bmp
+  segmentation_debug.json
+```
+
+其中JSON记录ROI、LAB基础阈值、所有候选阈值、候选Blob位置/面积/覆盖率及最终选中的分割方式。电脑端“K230模板工作台”点击“同步分割诊断”即可经WPD/MTP复制到`build/k230_diagnostic_cache/`；需要远程分析时，应提交整个`latest_template`目录，而不只是最终Mask。
+
 检测前的图像质量门控由`quality_gate`配置。`QUALITY:RETRY`表示当前帧因曝光、对比度或光照均匀性问题被拒绝并正在获取下一帧；超过`maximum_retries`后变为`QUALITY:ALARM`，不会输出该帧目标。状态恢复后自动回到`QUALITY:OK`。质量事件日志采用256 KB轮转上限。
 
 检测框标签使用高对比白色 `TYPE:<模板名称>` 显示工件类别，并显示目标流水号、状态、中心坐标、角度和置信度。画面右侧固定的 `DETECTION RESULT` 面板逐项显示 `TYPE` 模板类型、`X/Y` 图像中心坐标、`ANGLE` 旋转角度和 `SCORE` 置信度，避免随目标移动的标签被边界裁切。内部模板 UUID 不在屏幕上显示；模板名称缺失时显示 `Unnamed_Template`，避免把内部哈希误认为类别。完整模板 ID 仍保留在控制台心跳的 `current_objects` 和 `pick_target` 协议中。`COUNT` 是当前画面识别数量，`TYPES` 是当前画面内各模板类型的数量；刷新下一帧时会直接重新计算，不累计整条产线的历史数量。

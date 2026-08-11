@@ -41,7 +41,7 @@ from .template_matching import (
 )
 from .template_demo import prepare_template_demo
 from .tracking import TrackingConfig
-from .wpd_sync import sync_canmv_captures
+from .wpd_sync import sync_canmv_captures, sync_canmv_diagnostics
 
 
 IMAGE_TYPES = [("图像文件", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("所有文件", "*.*")]
@@ -1423,6 +1423,7 @@ class K230TemplateWorkbench(tk.Toplevel):
         ttk.Entry(source, textvariable=self.source_var).pack(side="left", fill="x", expand=True)
         ttk.Button(source, text="浏览", command=self._browse, style="Secondary.TButton").pack(side="left", padx=6)
         ttk.Button(source, text="从已连接K230同步", command=self._sync_connected, style="Secondary.TButton").pack(side="left", padx=(0, 6))
+        ttk.Button(source, text="同步分割诊断", command=self._sync_diagnostics, style="Secondary.TButton").pack(side="left", padx=(0, 6))
         ttk.Button(source, text="扫描图像", command=self._scan, style="Primary.TButton").pack(side="left")
 
         pane = ttk.Panedwindow(self, orient="horizontal")
@@ -1478,6 +1479,20 @@ class K230TemplateWorkbench(tk.Toplevel):
             self.summary_var.set(f"已从CanMV同步到本地缓存：{path}")
         except Exception as exc:
             messagebox.showerror("K230同步失败", str(exc), parent=self)
+        finally:
+            self.configure(cursor="")
+
+    def _sync_diagnostics(self) -> None:
+        self.configure(cursor="watch")
+        self.summary_var.set("正在同步K230最近一次模板分割诊断……")
+        self.update_idletasks()
+        try:
+            path = sync_canmv_diagnostics(self.parent.data_root / "build" / "k230_diagnostic_cache")
+            self.source_var.set(str(path))
+            self._scan()
+            self.summary_var.set(f"诊断文件已同步：{path}；可将整个目录交给Codex分析")
+        except Exception as exc:
+            messagebox.showerror("诊断同步失败", str(exc), parent=self)
         finally:
             self.configure(cursor="")
 

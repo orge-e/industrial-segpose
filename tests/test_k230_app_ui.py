@@ -32,6 +32,8 @@ def test_template_wizard_captures_and_previews_before_manual_roi():
     assert ui.preview_view == "original"
     assert ui.process_tap(300, 430) == "preview_mask"
     assert ui.preview_view == "mask"
+    assert ui.process_tap(360, 430) == "preview_overlay"
+    assert ui.preview_view == "overlay"
     assert ui.process_tap(450, 430) == "manual_roi"
     assert ui.page == "roi"
     assert ui.process_tap(100, 100) == "roi_first"

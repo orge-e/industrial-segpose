@@ -122,7 +122,7 @@ class IndustrialTouchUI:
                 self.message = "检查黄色ROI后保存"
                 return "roi_ready"
         elif self.page == "confirm":
-            if y >= 400 and x < 128:
+            if y >= 400 and x < 105:
                 self.page = "capture"
                 self.roi_points = []
                 self.auto_roi = None
@@ -131,22 +131,29 @@ class IndustrialTouchUI:
                 self.build_frame_id = None
                 self.message = "请重新调整工件后拍摄"
                 return "recapture_template"
-            if y >= 400 and x < 256:
+            if y >= 400 and x < 205:
                 self.preview_view = "original"
                 self.message = "原图：确认冻结帧与工件姿态"
                 return "preview_original"
-            if y >= 400 and x < 384:
+            if y >= 400 and x < 320:
                 self.preview_view = "mask"
                 self.message = "分割：白色区域必须只覆盖目标工件"
                 return "preview_mask"
-            if y >= 400 and x < 512:
+            if y >= 400 and x < 420:
+                self.preview_view = "overlay"
+                self.message = "叠加：绿色区域就是将要保存的工件Mask"
+                return "preview_overlay"
+            if y >= 400 and x < 520:
                 self.page = "roi"
                 self.roi_points = []
                 self.auto_roi = None
                 self.template_preview = None
                 return "manual_roi"
             if y >= 400:
-                if self.template_preview is not None and not self.template_preview.get("valid", False):
+                if self.template_preview is None:
+                    self.message = "请先完成分割预览"
+                    return "preview_invalid"
+                if not self.template_preview.get("valid", False):
                     self.message = self.template_preview.get("message", "模板预览无效")
                     return "preview_invalid"
                 return "save_template"
@@ -277,6 +284,25 @@ class IndustrialTouchUI:
             draw_w = int(mask.width() * scale)
             draw_h = int(mask.height() * scale)
             image.draw_image(mask, (panel_w - draw_w) // 2, 60 + (panel_h - draw_h) // 2, x_scale=scale, y_scale=scale)
+        elif self.preview_view == "overlay" and mask is not None:
+            mask_rect = preview.get("mask_rect") or preview.get("blob_rect")
+            overlay_layer = preview.get("mask_overlay")
+            if mask_rect:
+                try:
+                    if overlay_layer is not None:
+                        image.draw_image(
+                            overlay_layer, int(mask_rect[0]), int(mask_rect[1]),
+                            mask=mask, alpha=150,
+                        )
+                    else:
+                        # Firmware fallback: the exact selected pixels remain
+                        # visible even if an RGB565 overlay cannot be allocated.
+                        image.draw_image(
+                            mask, int(mask_rect[0]), int(mask_rect[1]),
+                            mask=mask, alpha=130,
+                        )
+                except Exception:
+                    pass
         image.draw_rectangle(0, 0, self.WIDTH, 60, color=(10, 20, 35, 220), fill=True)
         frame_label = "图像已冻结"
         if self.build_frame_id is not None:
@@ -293,25 +319,26 @@ class IndustrialTouchUI:
                 blob_rect = preview.get("blob_rect")
                 if blob_rect and self.preview_view == "overlay":
                     image.draw_rectangle(*blob_rect, color=(0, 255, 80, 255), thickness=4)
-                if mask is not None and self.preview_view == "overlay":
-                    panel_x, panel_y, panel_w, panel_h = 410, 68, 210, 150
-                    image.draw_rectangle(panel_x - 4, panel_y - 4, panel_w + 8, panel_h + 8, color=(8, 18, 28, 255), fill=True)
-                    scale = min(float(panel_w) / max(mask.width(), 1), float(panel_h) / max(mask.height(), 1))
-                    draw_w = int(mask.width() * scale)
-                    draw_h = int(mask.height() * scale)
-                    image.draw_image(mask, panel_x + (panel_w - draw_w) // 2, panel_y + (panel_h - draw_h) // 2, x_scale=scale, y_scale=scale)
-                    image.draw_rectangle(panel_x - 4, panel_y - 4, panel_w + 8, panel_h + 8, color=(0, 220, 100, 255), thickness=3)
                 quality = preview.get("quality", "invalid")
                 color = (70, 255, 130, 255) if quality == "good" else ((255, 215, 70, 255) if quality == "warning" else (255, 90, 90, 255))
                 self._text(image, 16, 65, 18, "预览: %s  覆盖率: %.1f%%" % (quality, preview.get("coverage", 0.0) * 100.0), color)
                 self._text(image, 16, 88, 16, preview.get("message", ""), color)
                 self._text(image, 16, 110, 15, "模式: %s  LAB: %s" % (preview.get("mode", "-"), preview.get("threshold", [])), (230, 240, 255, 255))
-            self._button(image, (0, 400, 128, 80), "重拍", color=(70, 90, 120, 255), size=18)
-            self._button(image, (128, 400, 128, 80), "原图", color=(45, 90, 145, 255), size=18)
-            self._button(image, (256, 400, 128, 80), "分割", color=(45, 110, 105, 255), size=18)
-            self._button(image, (384, 400, 128, 80), "ROI修正", color=(100, 80, 60, 255), size=17)
-            can_save = self.template_preview is None or self.template_preview.get("valid", False)
-            self._button(image, (512, 400, 128, 80), "保存" if can_save else "不合格", color=(16, 135, 95, 255) if can_save else (130, 65, 65, 255), size=18)
+                self._text(
+                    image, 16, 132, 15,
+                    "评分: %.2f  密度: %.2f  边界:%d  连通块:%d" % (
+                        preview.get("score", 0.0), preview.get("density", 0.0),
+                        preview.get("edge_touches", 0), preview.get("component_count", 0),
+                    ),
+                    (230, 240, 255, 255),
+                )
+            self._button(image, (0, 400, 105, 80), "重拍", color=(70, 90, 120, 255), size=17)
+            self._button(image, (105, 400, 100, 80), "原图", color=(45, 90, 145, 255), size=17)
+            self._button(image, (205, 400, 115, 80), "Mask", color=(45, 110, 105, 255), size=17)
+            self._button(image, (320, 400, 100, 80), "叠加", color=(25, 125, 95, 255), size=17)
+            self._button(image, (420, 400, 100, 80), "ROI", color=(100, 80, 60, 255), size=17)
+            can_save = self.template_preview is not None and self.template_preview.get("valid", False)
+            self._button(image, (520, 400, 120, 80), "保存" if can_save else "不合格", color=(16, 135, 95, 255) if can_save else (130, 65, 65, 255), size=17)
         else:
             self._button(image, (10, 425, 170, 50), "取消", color=(90, 70, 70, 255), size=18)
             self._button(image, (460, 425, 170, 50), "重选", color=(70, 90, 120, 255), size=18)

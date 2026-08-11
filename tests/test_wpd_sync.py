@@ -27,3 +27,19 @@ def test_wpd_sync_uses_local_cache_and_returns_capture_folder(tmp_path, monkeypa
 
     assert result == tmp_path / "sync_20260806_120000" / "captures"
     assert result.is_dir()
+
+
+def test_wpd_sync_returns_latest_template_diagnostics(tmp_path, monkeypatch):
+    def fake_run(command, **_kwargs):
+        destination = Path(command[command.index("-Destination") + 1])
+        assert command[command.index("-SourceFolder") + 1] == "diagnostics"
+        (destination / "diagnostics" / "latest_template").mkdir(parents=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(wpd_sync.sys, "platform", "win32")
+    monkeypatch.setattr(wpd_sync, "datetime", FixedDateTime)
+    monkeypatch.setattr(wpd_sync.subprocess, "run", fake_run)
+
+    result = wpd_sync.sync_canmv_diagnostics(tmp_path)
+
+    assert result == tmp_path / "sync_20260806_120000" / "diagnostics" / "latest_template"
