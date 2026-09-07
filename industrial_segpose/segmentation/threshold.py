@@ -1,3 +1,5 @@
+"""分割后端：使用全局阈值生成基础前景实例。"""
+
 import cv2
 import numpy as np
 from .base import as_gray, clean_binary, connected_instances
@@ -16,3 +18,4 @@ class ThresholdBackend:
         _, binary = cv2.threshold(gray, float(cfg["value"]), 255, flag)
         binary = clean_binary(binary, self.config)
         return connected_instances(binary, {"gray": gray, "binary": binary})
+"""分割后端：使用全局阈值生成基础前景实例。"""

@@ -92,6 +92,66 @@
         "coarse_scale_step": 0.12,
         "refine_transform_limit": 16
       }
+    },
+    {
+      "template_id": "0b804f3a2ce14430b72ae5766ea15cc1",
+      "name": "White_Cut_01",
+      "template_file": "0b804f3a_White_Cut_01.json",
+      "enabled": false,
+      "color_bgr": [
+        0,
+        180,
+        255
+      ],
+      "parameters": {
+        "score_threshold": 0.62,
+        "angle_min": -180.0,
+        "angle_max": 178.0,
+        "angle_step": 2.0,
+        "scale_min": 0.65,
+        "scale_max": 1.45,
+        "scale_step": 0.05,
+        "nms_iou_threshold": 0.25,
+        "use_edges": false,
+        "feature_mode": "white_cut_seam",
+        "max_candidates_per_transform": 20,
+        "max_results": 50,
+        "coarse_to_fine": true,
+        "coarse_trigger_transforms": 600,
+        "coarse_angle_step": 12.0,
+        "coarse_scale_step": 0.12,
+        "refine_transform_limit": 16
+      }
+    },
+    {
+      "template_id": "aa45a4a26a3c4b69ab9580ccb941c4c0",
+      "name": "99a2e7acb52f89d85239590f6a724511",
+      "template_file": "aa45a4a2_99a2e7acb52f89d85239590f6a724511.json",
+      "enabled": true,
+      "color_bgr": [
+        180,
+        80,
+        255
+      ],
+      "parameters": {
+        "score_threshold": 0.72,
+        "angle_min": -180.0,
+        "angle_max": 180.0,
+        "angle_step": 2.0,
+        "scale_min": 1.0,
+        "scale_max": 1.0,
+        "scale_step": 0.1,
+        "nms_iou_threshold": 0.25,
+        "use_edges": true,
+        "feature_mode": "auto",
+        "max_candidates_per_transform": 20,
+        "max_results": 200,
+        "coarse_to_fine": true,
+        "coarse_trigger_transforms": 600,
+        "coarse_angle_step": 12.0,
+        "coarse_scale_step": 0.12,
+        "refine_transform_limit": 16
+      }
     }
   ]
 }

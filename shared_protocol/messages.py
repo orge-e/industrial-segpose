@@ -1,7 +1,7 @@
 """Small JSON-lines protocol with no CPython-only dependencies.
 
-The module intentionally avoids dataclasses and third-party packages so the
-same file can be copied to a CanMV MicroPython filesystem.
+The module intentionally avoids dataclasses and third-party packages so it can
+also be reused by lightweight controller-side integration tests.
 """
 
 try:

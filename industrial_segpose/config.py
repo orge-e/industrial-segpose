@@ -16,7 +16,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "morphology": {"kernel_size": 3, "open_iterations": 1, "close_iterations": 1},
     "watershed": {"distance_threshold_ratio": 0.35, "background_dilate_iterations": 3, "min_marker_area": 30},
     "filter": {"min_area_px": 100, "max_area_px": None, "min_width_px": 5, "min_height_px": 5, "min_aspect_ratio": 0.05, "max_aspect_ratio": 20.0, "min_circularity": 0.0, "reject_border_objects": False},
-    "measurement": {"center_method": "moments", "angle_method": "pca", "angle_range": "0_180", "min_orientation_confidence": 0.15},
+    "measurement": {"center_method": "moments", "angle_method": "pca", "min_orientation_confidence": 0.15},
     "output": {"save_annotated": True, "save_masks": True, "save_label_map": True, "save_debug": False, "save_json": True, "save_csv": True},
 }
 

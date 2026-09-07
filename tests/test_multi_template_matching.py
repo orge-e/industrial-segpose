@@ -164,9 +164,35 @@ def test_multi_result_json_csv_and_visual_export(tmp_path):
     assert payload["ambiguous_count"] == 1
     assert len(payload["templates"]) == 2
     assert len(payload["objects"][0]["candidate_templates"]) == 2
+    assert payload["coordinate_system"]["origin"] == "bottom_left"
+    assert payload["coordinate_system"]["angle_positive_direction"] == "counter_clockwise"
+    assert payload["objects"][0]["center_x"] == pytest.approx(100.0)
+    assert payload["objects"][0]["center_y"] == pytest.approx(79.0)
+    assert payload["objects"][0]["angle_deg"] == pytest.approx(340.0)
+    assert payload["objects"][0]["axis_angle_deg"] == pytest.approx(160.0)
     with (run_dir / "results.csv").open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
     assert rows[0]["classification_status"] == "ambiguous"
     assert rows[0]["template_name"] == "待确认"
+    assert float(rows[0]["center_y"]) == pytest.approx(79.0)
+    assert float(rows[0]["angle_deg"]) == pytest.approx(340.0)
+    assert float(rows[0]["axis_angle_deg"]) == pytest.approx(160.0)
+    assert float(rows[0]["directed_angle_deg"]) == pytest.approx(340.0)
+    assert rows[0]["coordinate_origin"] == "bottom_left"
     assert json.loads(rows[0]["candidate_templates"])[0]["template_name"] in {"A", "B"}
     assert (run_dir / "annotated.png").is_file()
+
+
+def test_output_coordinate_serialization_does_not_change_native_match_result(tmp_path):
+    result = conflict_matcher(tmp_path / "library", 0.96, 0.80).match(
+        np.zeros((160, 200, 3), np.uint8)
+    )
+
+    native = result.to_dict()["objects"][0]
+    exported = result.to_output_dict()["objects"][0]
+
+    assert native["center_y"] == pytest.approx(80.0)
+    assert native["angle_deg"] == pytest.approx(20.0)
+    assert exported["center_y"] == pytest.approx(79.0)
+    assert exported["angle_deg"] == pytest.approx(340.0)
+    assert exported["box_points"][0] == pytest.approx([70.0, 99.0])

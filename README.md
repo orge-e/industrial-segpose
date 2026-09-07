@@ -1,127 +1,268 @@
 # FlexPose Vision
 
-轻量级工业目标分割、二维姿态估计与产线计数工具。项目以 OpenCV 为核心，覆盖离线批处理、旋转模板匹配、实例测量、实时跟踪、K230 模板导出和桌面操作界面，适合前景可分、姿态变化可控的工业场景。
+工业目标分割与二维位姿检测系统。该项目是一个轻量、可测试、可扩展的 OpenCV MVP：从单张图像或目录读取工业图像，分离独立实例，并输出每个目标的中心、无方向长轴角度、掩膜、可视化、JSON 和 CSV。当前版本不需要 PyTorch。
 
-## 核心能力
+## 功能
 
-- 阈值、自适应阈值、颜色范围和 Watershed 四类分割后端
-- PCA/最小旋转矩形中心与无方向长轴角度估计
-- 旋转、尺度感知的多模板匹配与跨模板候选抑制
-- 不规则目标 Mask 编辑、质量检查和模板库管理
-- 相机/视频实时检测、质量门控、目标跟踪和过线计数
-- JSON、CSV、逐实例 Mask、标注图和调试图导出
-- 电脑端模板验证及 K230 SD 卡部署包生成
-- 合成数据、基准测试和自动化测试
+- `threshold`、`adaptive_threshold`、`color_range`、`watershed` 四种统一分割后端
+- 灰度/HSV/Lab、缩放、ROI、Gaussian/median、CLAHE 和形态学预处理
+- 距离变换和 marker-based watershed 轻度粘连分离
+- 面积、尺寸、长宽比、圆度及边界接触过滤，并保留拒绝原因
+- 图像矩质心或最小旋转矩形中心
+- PCA 或最小旋转矩形长边方向及可靠性指标
+- 独立掩膜、彩色标签、调试图、标注图、JSON、CSV 与运行摘要
+- Unicode/中文和 Windows 路径，单图、目录及递归批处理
+- 可复现合成数据生成器与基础评估脚本
 
-## 适用边界
+## 坐标和角度
 
-该项目优先解决二维定位、角度测量、识别与计数，不将相关性得分解释为表面缺陷概率。强透视、严重遮挡、非刚性大形变或低对比场景需要重新标定参数，必要时可通过统一分割接口接入 ONNX 或深度学习模型。
+图像原点在左上角，x 向右、y 向下。姿态为 `(x, y, θ)`。`θ` 表示目标无方向长轴相对图像水平向右方向的角度，统一到 `[0°, 180°)`；因此 10° 与 190° 等价。可视化绘制穿过中心的轴线而非单向箭头。
 
-## 快速开始
+近圆形、正方形或缺少明显主方向的对象仍会得到角度，但 `angle_reliable` 可能为 `false`。置信度是 PCA 特征值差异或旋转矩形长宽比导出的几何指标，并非概率。
 
-需要 Python 3.10+。
+## 安装
+
+需要 Python 3.10+，推荐 3.11。
 
 ```bash
-git clone https://github.com/orge-e/industrial-segpose.git
-cd industrial-segpose
+pip install -r requirements.txt
+# 或开发模式
 pip install -e .
 ```
 
-启动桌面工作台：
+## 使用
+
+单图：
 
 ```bash
-python -m industrial_segpose.template_ui
-```
-
-运行单图分割与姿态估计：
-
-```bash
-python -m industrial_segpose infer \
-  --input samples/generated/separated/separated.png \
-  --config configs/default.yaml \
-  --output outputs
+python -m industrial_segpose infer --input samples/generated/separated/separated.png --config configs/default.yaml --output outputs
 ```
 
 目录批处理：
 
 ```bash
-python -m industrial_segpose infer \
-  --input samples/generated \
-  --recursive \
-  --config configs/default.yaml \
-  --output outputs \
-  --save-debug
+python -m industrial_segpose infer --input samples/generated --recursive --config configs/default.yaml --output outputs --save-debug
 ```
 
-## 处理流程
+可用参数包括 `--backend`、`--recursive`、`--save-debug/--no-save-debug`、`--save-masks/--no-save-masks`、`--save-json/--no-save-json` 和 `--save-csv/--no-save-csv`。任一图像失败会记录清晰错误并使 CLI 返回非零状态；批次中的其他图像仍会继续。
 
-```mermaid
-flowchart LR
-    A[图像/相机/视频] --> B[预处理与质量门控]
-    B --> C{检测模式}
-    C --> D[实例分割]
-    C --> E[旋转模板匹配]
-    D --> F[中心/轮廓/角度测量]
-    E --> F
-    F --> G[跨帧跟踪与计数]
-    F --> H[JSON/CSV/Mask/标注图]
-    G --> H
-```
+## 配置
 
-## 模板工作流
+`configs/default.yaml` 包含全部参数，另外提供 threshold、watershed 和 color range 示例。读取后会验证后端名、奇数卷积核、adaptive block size、watershed 阈值及测量方法。真实工业图像应根据材质、背景、光照、比例与所需过滤规则重新标定配置。
 
-1. 从基准图中导入或框选目标。
-2. 使用多边形、画笔或自动算法修正有效 Mask。
-3. 设置名称、阈值、角度和尺度范围并保存到模板库。
-4. 用独立场景图批量验证模板。
-5. 在实时生产页执行定位、分类、跟踪与过线计数。
+新增深度学习后端时，实现 `SegmentationBackend.segment(image) -> SegmentationResult` 并注册到 `segmentation/registry.py`。该结果以 0 为背景，每个实例使用不同正整数标签，并提供独立 masks；因此可以后续接入 YOLO Segmentation、Mask R-CNN、ONNX 或自定义模型，而不改变测量与输出层。
 
-角度表示目标相对模板的旋转量，规范到 `[-180°, 180°)`；实例分割模式的无方向长轴角度规范到 `[0°, 180°)`。近圆形或近正方形目标会降低 `angle_reliable`，不会把几何置信度伪装成概率。
+## 输出
 
-## K230 部署
+每次运行创建 `outputs/run_YYYYMMDD_HHMMSS_ffffff/`，其中：
 
-电脑端负责建立、修正和验证模板库，K230 负责加载部署包并执行轻量推理。生成部署目录：
+- `annotated/`：轮廓、半透明掩膜、编号、中心、长轴、旋转矩形和角度
+- `masks/`：逐实例二值掩膜
+- `labels/`：彩色实例标签图
+- `debug/`：预处理、二值图、距离变换和 markers（启用时）
+- `json/`：每张图的结构化结果与被拒绝实例原因
+- `csv/results.csv`：每行一个有效目标
+- `run_summary.json`：批次成功/失败、目标总数和耗时
+
+## 合成数据、测试和评估
+
+### 现场二维视觉孪生
+
+人工审查完成后，可先把真实实例导出为持久化数字资产库：
 
 ```powershell
-python -m industrial_segpose.k230_deploy `
-  --project . `
-  --output build/k230_sdcard `
-  --overwrite
+python scripts/generate_factory_simulation.py assets `
+  --image "datasets/real/现场批次01/images/现场图.jpg" `
+  --label-map "datasets/real/现场批次01/label_maps/现场图.labels.png" `
+  --output "datasets/assets/现场批次01"
 ```
 
-生成结果位于 `build/k230_sdcard/industrial_vision/`。部署程序默认不会控制执行机构，也不会自动覆盖 SD 卡启动文件。
+资产库包含透明 PNG、独立 Mask、每个实例的 JSON、来源文件哈希、类型与几何信息，以及 `asset_preview.jpg` 总览图。标签图旁同名的 `.labels.json` 会被自动读取。
 
-## 输出结构
+当现场图片不足时，可以从一张已经人工审查的现场图和实例标签图中抽取真实工件，重新组合为无堆叠、无重叠的新场景。生成器同步输出图像、实例标签图、单实例 Mask、中心、旋转轴、模板类型和可选的 0～360°语义角度，并提供 `clean`、`balanced`、`harsh` 三种相机扰动预设。
 
-```text
-outputs/run_<timestamp>/
-  annotated/       标注图
-  masks/           实例二值 Mask
-  labels/          彩色标签图
-  debug/           预处理与中间结果
-  json/            单图结构化结果
-  csv/results.csv  实例结果总表
-  run_summary.json 批次摘要
+```powershell
+python scripts/generate_factory_simulation.py compose `
+  --image "datasets/real/现场批次01/images/现场图.jpg" `
+  --label-map "datasets/real/现场批次01/label_maps/现场图.labels.png" `
+  --output "outputs/visual_twin" `
+  --count 100 --min-objects 1 --max-objects 12 --profile balanced
 ```
 
-## 验证
+可通过 `--background` 传入独立拍摄的空传送带背景，并用 `--roi X Y W H` 把随机放置限制在有效工作区。程序会自动读取标签图旁同名的 `.json` 类型信息；若要获得有方向含义的 0～360°角度，也可通过 `--asset-metadata` 显式传入 JSON，为每个源实例指定 `class_name`、`template_id` 和 `reference_angle_deg`。未提供参考方向时仍会输出可靠的 0～180°几何长轴角。合成结果用于开发、回归和压力测试，不能替代独立真实图片验收。
 
 ```bash
 python scripts/generate_synthetic_samples.py --output samples/generated
 python -m pytest
-python scripts/benchmark.py --data samples/generated --config configs/default.yaml
+python scripts/run_production_benchmark.py --overwrite
 ```
 
-合成数据用于验证软件链路，不代表真实产线精度。正式部署前应使用固定现场数据集评估定位误差、角度误差、计数准确率、失败率与处理耗时。
+生产基准测试会按固定随机种子生成无堆叠合成场景，注册到本地实验数据库，并比较统一分割后端的计数、Mask、中心、角度和耗时。生成的数据集、数据库和报告均为本地可再生产物，不提交到代码仓库。
 
-## 技术栈
+## 项目结构
 
-- Python 3.10+
-- OpenCV / NumPy / PyYAML
-- PySide6 桌面界面
-- pytest
-- K230 MicroPython 运行时适配
+核心包只在根目录保留命令入口、配置、主处理管线和公共结果类型；其余代码按职责归档：
 
-## 许可
+```text
+industrial_segpose/
+├─ calibration/       平面标定算法与命令入口
+├─ datasets/          数据集生成、适配和 Labelme 转换
+├─ detectors/         面向特定工况的专用检测器
+├─ evaluation/        Benchmark、压力测试与结果对比
+├─ experiment_db/     实验数据和指标持久化
+├─ filtering/         实例有效性过滤
+├─ io/                中文路径图像读取和结果写入
+├─ measurement/       中心、角度、坐标和抓取点测量
+├─ preprocessing/     缩放、增强、去噪和 ROI
+├─ production/        相机、质量门控、跟踪、计数和诊断
+├─ segmentation/      统一分割后端
+├─ template_matching/ 多模板管理、匹配与健康检查
+├─ ui_qt/             正式 PySide6 界面
+├─ ui_tk/             功能尚未完全迁移的 Tk 稳定版
+└─ visualization/     Mask、轮廓和位姿可视化
+```
 
-本项目采用 MIT License，详见 [LICENSE](LICENSE)。
+`configs/`、`scripts/`、`tests/` 分别保存配置、可重复执行的辅助程序和自动化测试。
+
+## 当前限制与后续计划
+
+- 传统阈值和 watershed 适合前景/背景可区分、轻度粘连的场景；严重重叠不能可靠恢复真实实例数，不会伪造结果。
+- Otsu 对强烈非均匀光照或低对比材质可能失效，需要 CLAHE、自适应阈值、颜色范围或针对现场重新标定。
+- 单个 mask 含多个不相连区域时当前测量最大轮廓；应在后端保证实例一致性。
+- 近圆形、正方形、褶皱柔性材料的长轴可能不稳定。
+- 当前只处理二维图像坐标，不估计三维姿态、相机坐标或毫米尺度。
+- 获取真实数据后，优先建立代表性标注集和验收指标；如传统方法不足，再通过统一接口接入 ONNX/YOLO/Mask R-CNN。
+
+接入真实工业图像时，请提供原始无损样图、相机分辨率和位深、目标/背景材质与颜色范围、光源和曝光变化、目标尺寸范围、允许的接触/重叠程度、边界目标规则、精度/延迟目标，以及一小批逐实例掩膜与角度标注。
+
+## 图像模板匹配 UI
+
+项目同时提供旋转感知的多目标模板匹配桌面工具，适合目标外观稳定、拍摄尺度和光照受控的工业场景。UI 可以从参考图像框选 ROI 建立模板，在检测图像中搜索不同旋转角度和尺度，并输出目标数量、中心坐标、相对模板旋转角、匹配得分与尺度。
+
+该工作流只进行目标识别、定位、角度测量和计数，不执行表面缺陷检测，也不依赖 PyTorch 或异常检测模型。
+
+启动桌面界面：
+
+```bash
+python -m industrial_segpose.ui_tk.app
+# 安装项目后也可以使用
+industrial-segpose-ui
+```
+
+### 工控机实时视觉工作站（v0.10）
+
+电脑端 UI 的“工控机实时视觉”页面向固定相机、USB 工业相机或视频回放。相机源支持设置采集分辨率、FPS、曝光、MJPG FOURCC，以及 Windows 下的 `DirectShow` / `MSMF` 后端；启动后状态栏会显示驱动实际接受的分辨率与帧率。
+
+实时画面可以直接拖框设置检测 ROI。算法会先裁剪 ROI，再按“检测最长边”执行尺寸保护，并将中心坐标、轮廓和旋转框严格映射回整幅原图坐标。因此可以保留高像素原图用于定位，同时避免 4K/高分辨率画面让 CPU 搜索时间失控。界面中的主计数为“当前画面工件数量”，按模板显示当前分类数量；原有过线累计仅作为辅助信息保留。
+
+“保存当前诊断”会在 `outputs/workstation_diagnostics/` 中写入原图、标注图和完整 JSON，包含模板名称、中心坐标、角度、置信度、ROI、图像质量及耗时，便于用现场图继续调参。
+
+### 实时生产与传送带计数（v0.8）
+
+“实时生产”页可以直接打开 OpenCV 支持的相机编号（通常为 `0`）或视频文件。采集线程持续读取画面并只保留最新帧，检测线程独立运行，因此高分辨率图像或复杂模板搜索不会阻塞 UI。
+
+实时链路包含：
+
+- 欠曝、过曝、模糊和大范围光照不均检测；启用质量门控后不合格帧不会进入模板匹配。
+- 跨帧最近邻轨迹关联，为同一工件分配稳定 `track_id`。
+- 可配置横向/纵向计数线、正向/反向/双向计数；同一轨迹只累计一次。
+- 当前画面中心与角度、累计总数、分类累计数量、活动轨迹、质量指标和处理耗时可视化。
+- “清零累计”只重置本次运行的轨迹和计数，不修改模板库。
+
+使用建议：先保持工件在单帧内可完整观察，再把计数线放在检测区域中后段；相邻检测帧中目标移动距离应小于跟踪距离。正式相机建议锁定曝光、增益、焦距、分辨率和安装高度。当前相机层使用 OpenCV `VideoCapture`，后续可在不改变匹配与计数接口的前提下接入海康、大恒等工业相机 SDK。
+
+对于灰度、边缘和色度等通用相关性匹配，当角度与尺度组合超过阈值时，系统自动执行粗到细搜索：先以较大步长筛选高分姿态区域，再按模板原始角度/尺度步长精修。柔性姿态和暗色纹理模式继续使用候选连通区域、PCA 姿态估计与局部精修。
+
+“模板检测”页的“合成自检”只用于快速确认 UI、模板库、匹配、计数和结果输出链路能够运行。它会由程序生成 2 类仿纺织工件和包含 5 个多角度目标的合成图，不是现场精度演示，也不能替代真实工件验收。正式演示应使用现场拍摄的独立模板图和检测场景图；合成素材不会写入或上传用户的实拍图片。
+
+使用流程：
+
+1. 在“建立模板”页点击“导入并自动绘制”，程序会从整张基准图中自动定位主要纺织工件、生成紧裁剪 ROI 和初始 Mask，并直接打开绿色轮廓编辑器。背景复杂或自动定位失败时，也可以选择“仅加载 / 手动框选”。
+2. 对不规则目标点击“编辑不规则形状”：多边形工具逐点勾勒轮廓，双击闭合；画笔工具左键添加、右键擦除。绿色区域是实际参与匹配的区域。规则矩形目标可以跳过这一步。
+   - “智能组合”会比较纺织色度、GrabCut、边界 Lab 颜色差、亮目标 Otsu 和暗目标 Otsu，自动选择质量指标较好的初始 mask。
+   - 对浅粉、浅红等位于灰白中性背景上的纺织件，优先使用“纺织色度分割”。它联合 Lab 色度和 HSV 饱和度提取完整外轮廓，降低阴影、白色背景和内部印花对建模的干扰。
+   - 也可以明确选择其中一种算法，适应亮目标、暗目标、颜色差明显或背景复杂的图像。
+   - 算法输出只是辅助初稿，界面会显示覆盖率和质量指标；保存前应检查绿色覆盖区域，并用多边形、画笔或右键橡皮擦修正。
+3. 保存前程序会检查Mask覆盖率、明显连通区域、主体占比和边界接触，并对可能包含背景或分割断裂的模板给出警告。确认后按有效Mask自动紧裁剪并保留少量边距。新版模板由同名的 JSON 元数据、PNG 图像和 `.mask.png` 二值形状掩膜组成；旧版矩形模板仍可直接加载。
+4. 在“模板检测”页加载模板与检测图像，设置得分阈值、角度范围/步长和可选尺度范围。
+5. 点击“开始检测”，界面显示实际形状轮廓、旋转框、目标中心、目标类型、数量、角度和得分。
+6. 点击“保存结果”，输出标注图、`results.json` 和适合 Excel 打开的 `results.csv`。
+
+### 多模板工件库
+
+模板保存后会自动加入 `templates/template_library.json` 管理的持久模板库。检测页可以导入更多模板、启用/停用模板、单独编辑每种工件的匹配阈值与角度/尺度范围，以及将模板移出库。移出模板库只删除清单记录，不删除模板图片和 mask。
+
+模板名称直接作为检测界面的`TYPE`和分类统计名称，因此新建时必须填写明确类型。模板库中的“重命名类型”可以在保持稳定内部ID和模板资产不变的情况下修改显示名称，例如把`t1`改成`Pink_Textile_01`。
+
+一次检测会运行全部有效且已启用的模板，并同时输出总目标数和 `counts_by_template` 分类数量。不同模板在同一位置产生候选时，系统使用跨模板轮廓 NMS 和相对各自阈值的归一化得分进行识别；最佳与次佳归一化得分差小于 `0.08` 时标记为“待确认”。待确认目标计入总数，但不计入明确工件类型数量。
+
+JSON 输出包含所用模板、分类数量、待确认数量、损坏模板错误和每个目标的候选模板得分。CSV 包含 `classification_status`、`template_id`、`template_name` 和 `candidate_templates`，方便后续人工复核或接入生产系统。
+
+角度表示检测目标相对模板的旋转量，逆时针为正，范围规范化为 `[-180°, 180°)`。中心坐标使用模板有效 mask 的图像矩质心，不规则形状不会退化为外接矩形中心。匹配时模板图像与 mask 同步旋转、缩放，mask 外的背景不参与相关性计算。角度精度受“角度步长”限制；较小步长更精确但运行时间更长。目标尺寸固定时保持尺度为 `1.0`；存在成像比例变化时再扩大尺度搜索范围。边缘匹配对均匀亮度变化更稳健，灰度匹配则保留更多纹理信息。
+
+### 纺织件推荐配置
+
+- 建模板时框选工件并在四周保留少量背景，进入不规则形状编辑器后选择“纺织色度分割”，确认绿色覆盖完整外形后再保存。
+- 检测参数优先使用“柔性姿态”：它把色度前景边缘做容差扩展，适合存在轻微翘边、阴影和局部轮廓偏移但主要关注中心与角度的场景。轮廓较稳定时可使用“纺织色度”；现场颜色不稳定时可改为“轮廓边缘”，需要利用印花或内部纹理区分相似工件时可尝试“灰度纹理”。
+- 角度范围应按现场输送姿态收窄；工件可能任意旋转时使用 `-180°~180°`，并从较大的角度步长开始标定，再按精度需要逐步减小。
+- 柔性纺织件若存在明显拉伸、卷曲或褶皱，应为典型形变状态分别建立模板。当前算法按刚性旋转/缩放匹配，不把表面印花差异当作缺陷进行判断。
+- 自动化流程应优先使用中心坐标、旋转角度、识别状态和得分；轮廓仅作可视化参考。当前中心坐标是图像像素坐标，如需机械臂或输送线的毫米坐标，还需要相机标定及像素到现场坐标的变换。
+
+模板匹配不是特征学习方法。模板应尽量紧密包含目标，并使用与检测阶段一致的相机、焦距、物距和照明。严重遮挡、强透视变化、目标形变或大幅尺度变化时，应改用特征匹配或深度学习检测/分割模型。
+
+### 可重复合成压力测试
+
+企业现场返图尚未到位时，可以直接使用当前已启用的真实模板库生成确定性合成场景，回归检查多模板分类、当前画面计数、中心坐标和360°角度。场景会按模板各自配置的角度与尺度范围随机放置目标，并可叠加曝光变化、照度梯度、模糊和传感器噪声。
+
+```powershell
+industrial-segpose benchmark --templates templates --output outputs/synthetic_benchmark --scenes 20 --seed 42 --profile balanced
+```
+
+压力等级包括`clean`、`balanced`和`harsh`。输出目录包含：
+
+- `benchmark_config.json`：随机种子、场景参数、评估阈值和参与测试的模板快照。
+- `ground_truth.jsonl`、`predictions.jsonl`与`evaluations.jsonl`：逐场景真值、完整检测结果及一对一误差明细，可用于后续算法版本对比。
+- `per_scene.csv`与`summary.json`：计数准确性、Precision、Recall、F1、分类准确率、中心误差、角度误差和处理耗时。
+- `scenes/`与`annotated/`：合成输入及检测标注图；只需要数值回归时可加`--no-save-images`节省空间。
+
+该测试用于发现代码回归和评估抗扰动趋势，不能替代企业现场图片验收。企业返图到位后，应继续沿用相同指标和报告结构，并以现场独立测试集结果作为最终结论。
+
+### 真实标注集验证
+
+人工审查后的现场数据使用 `images/` 与 `label_maps/` 两个目录保存；每张原图对应一个 `<stem>.labels.png` 实例标签图，`0` 为背景，不同正整数代表不同工件。可直接运行：
+
+```powershell
+industrial-segpose validate-real --dataset datasets/real/<批次名称> --output outputs/real_validation
+```
+
+程序会在独立运行目录中保存 SQLite 实验记录、CSV/JSON/Markdown 指标、各算法预测 Mask，以及 `visual_comparison.jpg`。对照图每行是一张真实输入，列为人工真值、四个通用分割后端和荧光纺织件专用检测器的实际结果；绿色表示匹配成功，紫色表示误检，红色表示漏检。该命令支持中文文件名和中文目录。
+
+现场固定相机应使用 `--roi X Y WIDTH HEIGHT` 排除机架、料框、人手通道和传送带外区域。ROI 属于相机工位配置，必须用独立测试图验证，不能通过裁掉难例来虚增指标。
+
+电脑端UI新增“算法验证”页。进入页面后会自动检查模板文件、Mask覆盖率与连通性、前景亮度/色度/纹理，并比较当前特征模式和外观推荐模式。模式建议不会自动覆盖模板参数，必须由操作者确认应用。
+
+“自动搜索所选模板”会在固定随机种子的同一组合成场景上比较有限数量的特征模式、得分阈值、角度步长和尺度范围，最多运行6组配置、每组复用1–20个场景。搜索在后台线程中执行，完成后先展示Precision、Recall、F1、中心/角度误差和耗时，点击“应用搜索结果”才会写回模板库。诊断和搜索报告保存在`outputs/algorithm_validation/`。这些参数仍属于合成环境下的初始推荐，企业现场图片到位后必须重新回放验证。
+
+## 标定与控制接口
+
+电脑端可点击模板建立页的“相机—机械坐标标定”，选择点位JSON并输出带校验的标定文件、逐点CSV和Markdown误差报告；也可使用命令行：
+
+```powershell
+python -m industrial_segpose.calibration.cli --points configs/calibration_points.example.json --output calibration_output
+```
+
+标定结果可保存在项目根目录的 `calibration/`，由电脑端运行时加载。控制接口继续使用共享 JSON Lines 协议输出模板名称、图像坐标、世界坐标、角度、置信度和安全吸取点；相机采集、检测与坐标转换均在工控机上执行。
+
+## 工业相机垂直俯拍模式
+
+正式工况默认相机光轴垂直于传送带平面，相机高度、焦距和对焦位置固定。应在 UI 中设置固定检测 ROI，只包含可吸取区域，排除机架、人手、传送带边缘和尚未进入吸取区的母布。完成相机内参标定和平面单应性标定后，再将像素中心、吸取点和角度转换为机械坐标。
+
+对于荧光黄绿色裁片，实时页可选择“荧光工件分割”。算法使用 HSV 和 Lab 色度联合分割、形态学去噪、连通域筛选、PCA 360°姿态估计和距离变换安全吸取点规划。结果包含当前画面数量、中心、角度、吸取点和安全半径。与整张原料仍然连通的大区域默认不允许自动吸取，需等待裁片完全分离，或另行接入排版文件/切缝实例分割逻辑。
+
+离线诊断命令：
+
+```powershell
+industrial-segpose fluorescent-diagnose --input <图片或目录> --output build/fluorescent_diagnostics --recursive
+```
+
+输出包含原图、标注图、颜色掩膜、去噪掩膜、连通域图、吸取点图和 JSON 结果，用于现场调参和故障溯源。

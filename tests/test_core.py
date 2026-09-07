@@ -41,7 +41,8 @@ def test_center_moments_and_fallback():
 def test_orientations(angle):
     contour = contour_at(angle)
     rect_angle, _ = min_area_rect_orientation(contour); pca_angle, _ = pca_orientation(contour)
-    assert axis_error(rect_angle, angle) < 2; assert axis_error(pca_angle, angle) < 2
+    expected = (-angle) % 180.0
+    assert axis_error(rect_angle, expected) < 2; assert axis_error(pca_angle, expected) < 2
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(-10, 170), (0, 0), (180, 0), (190, 10), (540, 0)])

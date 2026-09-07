@@ -1,3 +1,5 @@
+"""分割后端注册表：根据配置名称构造对应算法实现。"""
+
 from .threshold import ThresholdBackend
 from .adaptive_threshold import AdaptiveThresholdBackend
 from .color_range import ColorRangeBackend
@@ -11,3 +13,4 @@ def create_backend(name: str, config: dict):
         return BACKENDS[name](config)
     except KeyError as exc:
         raise ValueError(f"Unknown backend '{name}'. Available: {', '.join(BACKENDS)}") from exc
+"""分割后端注册表：根据配置名称构造对应算法实现。"""
