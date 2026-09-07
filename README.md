@@ -66,17 +66,63 @@ python -m industrial_segpose infer --input samples/generated --recursive --confi
 
 ## 合成数据、测试和评估
 
+### 现场二维视觉孪生
+
+人工审查完成后，可先把真实实例导出为持久化数字资产库：
+
+```powershell
+python scripts/generate_factory_simulation.py assets `
+  --image "datasets/real/现场批次01/images/现场图.jpg" `
+  --label-map "datasets/real/现场批次01/label_maps/现场图.labels.png" `
+  --output "datasets/assets/现场批次01"
+```
+
+资产库包含透明 PNG、独立 Mask、每个实例的 JSON、来源文件哈希、类型与几何信息，以及 `asset_preview.jpg` 总览图。标签图旁同名的 `.labels.json` 会被自动读取。
+
+当现场图片不足时，可以从一张已经人工审查的现场图和实例标签图中抽取真实工件，重新组合为无堆叠、无重叠的新场景。生成器同步输出图像、实例标签图、单实例 Mask、中心、旋转轴、模板类型和可选的 0～360°语义角度，并提供 `clean`、`balanced`、`harsh` 三种相机扰动预设。
+
+```powershell
+python scripts/generate_factory_simulation.py compose `
+  --image "datasets/real/现场批次01/images/现场图.jpg" `
+  --label-map "datasets/real/现场批次01/label_maps/现场图.labels.png" `
+  --output "outputs/visual_twin" `
+  --count 100 --min-objects 1 --max-objects 12 --profile balanced
+```
+
+可通过 `--background` 传入独立拍摄的空传送带背景，并用 `--roi X Y W H` 把随机放置限制在有效工作区。程序会自动读取标签图旁同名的 `.json` 类型信息；若要获得有方向含义的 0～360°角度，也可通过 `--asset-metadata` 显式传入 JSON，为每个源实例指定 `class_name`、`template_id` 和 `reference_angle_deg`。未提供参考方向时仍会输出可靠的 0～180°几何长轴角。合成结果用于开发、回归和压力测试，不能替代独立真实图片验收。
+
 ```bash
 python scripts/generate_synthetic_samples.py --output samples/generated
 python -m pytest
-python scripts/benchmark.py --data samples/generated --config configs/default.yaml
+python scripts/run_production_benchmark.py --overwrite
 ```
 
-合成数据包含分离矩形、旋转长条、椭圆、噪声、非均匀照明、边界对象和空白图，同时保存真实中心、角度、标签图与逐实例掩膜。角度误差按模 180° 计算。
+生产基准测试会按固定随机种子生成无堆叠合成场景，注册到本地实验数据库，并比较统一分割后端的计数、Mask、中心、角度和耗时。生成的数据集、数据库和报告均为本地可再生产物，不提交到代码仓库。
 
 ## 项目结构
 
-核心代码按 `io`、`preprocessing`、`segmentation`、`filtering`、`measurement`、`visualization` 和 `pipeline` 分层；`configs/`、`scripts/`、`tests/` 分别保存配置、数据/评估工具和测试。
+核心包只在根目录保留命令入口、配置、主处理管线和公共结果类型；其余代码按职责归档：
+
+```text
+industrial_segpose/
+├─ calibration/       平面标定算法与命令入口
+├─ datasets/          数据集生成、适配和 Labelme 转换
+├─ detectors/         面向特定工况的专用检测器
+├─ evaluation/        Benchmark、压力测试与结果对比
+├─ experiment_db/     实验数据和指标持久化
+├─ filtering/         实例有效性过滤
+├─ io/                中文路径图像读取和结果写入
+├─ measurement/       中心、角度、坐标和抓取点测量
+├─ preprocessing/     缩放、增强、去噪和 ROI
+├─ production/        相机、质量门控、跟踪、计数和诊断
+├─ segmentation/      统一分割后端
+├─ template_matching/ 多模板管理、匹配与健康检查
+├─ ui_qt/             正式 PySide6 界面
+├─ ui_tk/             功能尚未完全迁移的 Tk 稳定版
+└─ visualization/     Mask、轮廓和位姿可视化
+```
+
+`configs/`、`scripts/`、`tests/` 分别保存配置、可重复执行的辅助程序和自动化测试。
 
 ## 当前限制与后续计划
 
@@ -98,20 +144,18 @@ python scripts/benchmark.py --data samples/generated --config configs/default.ya
 启动桌面界面：
 
 ```bash
-python -m industrial_segpose.template_ui
+python -m industrial_segpose.ui_tk.app
 # 安装项目后也可以使用
 industrial-segpose-ui
 ```
 
-### K230采集图像与模板工作台
+### 工控机实时视觉工作站（v0.10）
 
-“建立模板”页新增“K230采集图像 / 模板工作台”。如果SD卡以盘符挂载，可直接读取根目录、`industrial_vision/`、`captures/`或单个`session_NNNN/`目录；如果设备在Windows中仅显示为CanMV便携设备（WPD/MTP），点击“从已连接K230同步”，程序会先复制到`build/k230_capture_cache/`再读取。工作台会按批次列出图片、显示尺寸和可缩放预览，并提供完整流程：
+电脑端 UI 的“工控机实时视觉”页面向固定相机、USB 工业相机或视频回放。相机源支持设置采集分辨率、FPS、曝光、MJPG FOURCC，以及 Windows 下的 `DirectShow` / `MSMF` 后端；启动后状态栏会显示驱动实际接受的分辨率与帧率。
 
-1. 选择一张图片作为基准图，进入现有自动分割与Mask画笔修正界面；确认后保存到电脑端`templates/`模板库。
-2. 多选其他现场图片执行批量回放。程序先按K230实际格式转换当前模板库，再使用板端同类LAB分割与几何评分生成标注预览和`validation_report.json`。
-3. 回到主“建立模板”页面点击“生成完整K230部署包”，输出`build/k230_sdcard/industrial_vision/`。所有有效模板都会写入部署包；停用模板保留停用状态，可在K230模板库中重新启用。包内不包含原始采集照片。
+实时画面可以直接拖框设置检测 ROI。算法会先裁剪 ROI，再按“检测最长边”执行尺寸保护，并将中心坐标、轮廓和旋转框严格映射回整幅原图坐标。因此可以保留高像素原图用于定位，同时避免 4K/高分辨率画面让 CPU 搜索时间失控。界面中的主计数为“当前画面工件数量”，按模板显示当前分类数量；原有过线累计仅作为辅助信息保留。
 
-模块部署仍由操作者手动完成；工作台不会自动覆盖SD卡，也不会修改K230根目录的启动文件。这样可以在电脑上完成精细分割、人工复核和批量验收，再把同一份已验证部署包复制到模块。
+“保存当前诊断”会在 `outputs/workstation_diagnostics/` 中写入原图、标注图和完整 JSON，包含模板名称、中心坐标、角度、置信度、ROI、图像质量及耗时，便于用现场图继续调参。
 
 ### 实时生产与传送带计数（v0.8）
 
@@ -148,7 +192,7 @@ industrial-segpose-ui
 
 模板保存后会自动加入 `templates/template_library.json` 管理的持久模板库。检测页可以导入更多模板、启用/停用模板、单独编辑每种工件的匹配阈值与角度/尺度范围，以及将模板移出库。移出模板库只删除清单记录，不删除模板图片和 mask。
 
-模板名称直接作为检测界面的`TYPE`和分类统计名称，因此新建时必须填写明确类型。模板库中的“重命名类型”可以在保持稳定内部ID和模板资产不变的情况下修改显示名称，例如把`t1`改成`Pink_Textile_01`；重新生成K230部署包后模块会同步显示新名称。
+模板名称直接作为检测界面的`TYPE`和分类统计名称，因此新建时必须填写明确类型。模板库中的“重命名类型”可以在保持稳定内部ID和模板资产不变的情况下修改显示名称，例如把`t1`改成`Pink_Textile_01`。
 
 一次检测会运行全部有效且已启用的模板，并同时输出总目标数和 `counts_by_template` 分类数量。不同模板在同一位置产生候选时，系统使用跨模板轮廓 NMS 和相对各自阈值的归一化得分进行识别；最佳与次佳归一化得分差小于 `0.08` 时标记为“待确认”。待确认目标计入总数，但不计入明确工件类型数量。
 
@@ -166,35 +210,59 @@ JSON 输出包含所用模板、分类数量、待确认数量、损坏模板错
 
 模板匹配不是特征学习方法。模板应尽量紧密包含目标，并使用与检测阶段一致的相机、焦距、物距和照明。严重遮挡、强透视变化、目标形变或大幅尺度变化时，应改用特征匹配或深度学习检测/分割模型。
 
-## K230 本地部署包
+### 可重复合成压力测试
 
-K230视觉与任务控制子系统的统一目标结构、质量位标志、候选抓取点及平面标定框架见 [实施状态说明](docs/vision_task_subsystem.md)。
+企业现场返图尚未到位时，可以直接使用当前已启用的真实模板库生成确定性合成场景，回归检查多模板分类、当前画面计数、中心坐标和360°角度。场景会按模板各自配置的角度与尺度范围随机放置目标，并可叠加曝光变化、照度梯度、模糊和传感器噪声。
+
+```powershell
+industrial-segpose benchmark --templates templates --output outputs/synthetic_benchmark --scenes 20 --seed 42 --profile balanced
+```
+
+压力等级包括`clean`、`balanced`和`harsh`。输出目录包含：
+
+- `benchmark_config.json`：随机种子、场景参数、评估阈值和参与测试的模板快照。
+- `ground_truth.jsonl`、`predictions.jsonl`与`evaluations.jsonl`：逐场景真值、完整检测结果及一对一误差明细，可用于后续算法版本对比。
+- `per_scene.csv`与`summary.json`：计数准确性、Precision、Recall、F1、分类准确率、中心误差、角度误差和处理耗时。
+- `scenes/`与`annotated/`：合成输入及检测标注图；只需要数值回归时可加`--no-save-images`节省空间。
+
+该测试用于发现代码回归和评估抗扰动趋势，不能替代企业现场图片验收。企业返图到位后，应继续沿用相同指标和报告结构，并以现场独立测试集结果作为最终结论。
+
+### 真实标注集验证
+
+人工审查后的现场数据使用 `images/` 与 `label_maps/` 两个目录保存；每张原图对应一个 `<stem>.labels.png` 实例标签图，`0` 为背景，不同正整数代表不同工件。可直接运行：
+
+```powershell
+industrial-segpose validate-real --dataset datasets/real/<批次名称> --output outputs/real_validation
+```
+
+程序会在独立运行目录中保存 SQLite 实验记录、CSV/JSON/Markdown 指标、各算法预测 Mask，以及 `visual_comparison.jpg`。对照图每行是一张真实输入，列为人工真值、四个通用分割后端和荧光纺织件专用检测器的实际结果；绿色表示匹配成功，紫色表示误检，红色表示漏检。该命令支持中文文件名和中文目录。
+
+现场固定相机应使用 `--roi X Y WIDTH HEIGHT` 排除机架、料框、人手通道和传送带外区域。ROI 属于相机工位配置，必须用独立测试图验证，不能通过裁掉难例来虚增指标。
+
+电脑端UI新增“算法验证”页。进入页面后会自动检查模板文件、Mask覆盖率与连通性、前景亮度/色度/纹理，并比较当前特征模式和外观推荐模式。模式建议不会自动覆盖模板参数，必须由操作者确认应用。
+
+“自动搜索所选模板”会在固定随机种子的同一组合成场景上比较有限数量的特征模式、得分阈值、角度步长和尺度范围，最多运行6组配置、每组复用1–20个场景。搜索在后台线程中执行，完成后先展示Precision、Recall、F1、中心/角度误差和耗时，点击“应用搜索结果”才会写回模板库。诊断和搜索报告保存在`outputs/algorithm_validation/`。这些参数仍属于合成环境下的初始推荐，企业现场图片到位后必须重新回放验证。
+
+## 标定与控制接口
 
 电脑端可点击模板建立页的“相机—机械坐标标定”，选择点位JSON并输出带校验的标定文件、逐点CSV和Markdown误差报告；也可使用命令行：
 
 ```powershell
-python -m industrial_segpose.calibration_cli --points configs/calibration_points.example.json --output calibration_output
+python -m industrial_segpose.calibration.cli --points configs/calibration_points.example.json --output calibration_output
 ```
 
-若要随部署包复制标定文件，请将输出目录改为项目根目录下的`calibration`。现场验证前，K230配置中的`calibration.enabled`保持`false`；启用后板端会按“单应性局部坐标 + 轴位置快照 + 吸头偏置”输出`world_point_mm`。
+标定结果可保存在项目根目录的 `calibration/`，由电脑端运行时加载。控制接口继续使用共享 JSON Lines 协议输出模板名称、图像坐标、世界坐标、角度、置信度和安全吸取点；相机采集、检测与坐标转换均在工控机上执行。
 
-K230检测前会执行轻量质量门控。坏帧显示`QUALITY:RETRY`并自动获取下一帧，连续超过配置次数显示`QUALITY:ALARM`；曝光恢复后自动回到`QUALITY:OK`。质量状态变化记录在`logs/runtime_events.log`，日志达到256 KB后只保留一个轮转备份，避免持续占用SD卡。
+## 工业相机垂直俯拍模式
 
-在未连接开发板时，所有 K230 开发和生成物均保存在本项目的 D 盘目录。生成可复制到 SD 卡的目录：
+正式工况默认相机光轴垂直于传送带平面，相机高度、焦距和对焦位置固定。应在 UI 中设置固定检测 ROI，只包含可吸取区域，排除机架、人手、传送带边缘和尚未进入吸取区的母布。完成相机内参标定和平面单应性标定后，再将像素中心、吸取点和角度转换为机械坐标。
+
+对于荧光黄绿色裁片，实时页可选择“荧光工件分割”。算法使用 HSV 和 Lab 色度联合分割、形态学去噪、连通域筛选、PCA 360°姿态估计和距离变换安全吸取点规划。结果包含当前画面数量、中心、角度、吸取点和安全半径。与整张原料仍然连通的大区域默认不允许自动吸取，需等待裁片完全分离，或另行接入排版文件/切缝实例分割逻辑。
+
+离线诊断命令：
 
 ```powershell
-python -m industrial_segpose.k230_deploy --project . --output build/k230_sdcard --overwrite
+industrial-segpose fluorescent-diagnose --input <图片或目录> --output build/fluorescent_diagnostics --recursive
 ```
 
-生成结果为 `build/k230_sdcard/industrial_vision/`。连接 K230 后只需把该目录复制到 `/sdcard/industrial_vision/`，再手动运行其中的 `main.py`；验证完成前不要替换 SD 卡根目录原有启动程序。板端当前为只显示、计数和控制台输出的安全模式，不会控制吸盘。
-
-生产环境推荐由电脑端建立和验证关键模板库；K230同时保留用于现场调试的建模入口。可以使用桌面UI中的“K230采集图像 / 模板工作台”，也可以通过命令行用K230采集的整批现场原图离线回放：
-
-```powershell
-python -m industrial_segpose.k230_export --library templates --output build/k230_templates --overwrite
-python -m industrial_segpose.k230_validation --bundle build/k230_templates/template_library.json --images <采集图片目录> --output reports/k230_validation
-```
-
-默认仍以“电脑端精细建库、K230执行检测”为主，但 `device_config.json` 已保留并启用板端调试建模。板端按“实时取景→拍摄并冻结唯一帧→自动分割预览→原图/Mask/叠加检查→可选ROI修正→保存”的固定流程运行；重拍会释放冻结帧并返回实时取景。关键生产模板仍应在电脑端批量回放验收后部署。
-
-K230 检测页会在目标框旁和右侧固定结果面板中明确显示模板名称、目标流水号、识别状态、中心坐标、角度和置信度。模板名称采用独立的高对比白色文字绘制，避免目标框颜色在实机视频层上导致文字不可见。内部模板 UUID 不在屏幕上显示，但仍保留在 JSON 与串口协议中供程序追踪。顶部 `COUNT` 仅表示当前画面内识别到的工件数量，`TYPES` 表示当前画面的分类数量；界面不再显示产线累计数量或计数线。周期心跳 JSON 的 `frame_total`、`counts_by_template` 和 `current_objects` 同样描述当前画面。
+输出包含原图、标注图、颜色掩膜、去噪掩膜、连通域图、吸取点图和 JSON 结果，用于现场调参和故障溯源。

@@ -1,3 +1,5 @@
+"""实例过滤：依据面积、尺寸、形状和边界条件剔除无效目标。"""
+
 import cv2
 import numpy as np
 from ..measurement.geometry import touches_border
@@ -20,3 +22,4 @@ def evaluate_instance(mask: np.ndarray, contour: np.ndarray, config: dict) -> tu
     if circularity < float(cfg.get("min_circularity", 0.0)): reasons.append("invalid_geometry")
     if cfg["reject_border_objects"] and border: reasons.append("touching_border")
     return reasons, {"area": area, "bbox": (x, y, width, height), "perimeter": perimeter, "aspect": aspect, "circularity": circularity, "touches_border": border}
+"""实例过滤：依据面积、尺寸、形状和边界条件剔除无效目标。"""

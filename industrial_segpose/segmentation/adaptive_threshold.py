@@ -1,3 +1,5 @@
+"""分割后端：使用自适应阈值应对局部光照变化。"""
+
 import cv2
 import numpy as np
 from .base import as_gray, clean_binary, connected_instances
@@ -14,3 +16,4 @@ class AdaptiveThresholdBackend:
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, mode, int(cfg["block_size"]), float(cfg["c"]))
         binary = clean_binary(binary, self.config)
         return connected_instances(binary, {"gray": gray, "binary": binary})
+"""分割后端：使用自适应阈值应对局部光照变化。"""

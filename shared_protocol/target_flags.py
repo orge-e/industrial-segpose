@@ -1,4 +1,4 @@
-"""Stable target-quality bit definitions shared by PC, K230 and STM32."""
+"""Stable target-quality bit definitions shared by the PC and controller."""
 
 
 FLAG_TOUCHES_BORDER = 1 << 0

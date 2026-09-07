@@ -1,14 +1,14 @@
 import cv2
 import numpy as np
 
-from industrial_segpose.camera import OpenCVCameraSource
-from industrial_segpose.quality import ImageQualityConfig, evaluate_image_quality
-from industrial_segpose.runtime import ConveyorSession, draw_conveyor_frame
+from industrial_segpose.production.camera import CameraSettings, OpenCVCameraSource
+from industrial_segpose.production.quality import ImageQualityConfig, evaluate_image_quality
+from industrial_segpose.production.runtime import ConveyorSession, draw_conveyor_frame
 from industrial_segpose.template_matching.multi_matcher import (
     MultiTemplateResult,
     RecognizedObject,
 )
-from industrial_segpose.tracking import ConveyorTracker, TrackingConfig
+from industrial_segpose.production.tracking import ConveyorTracker, TrackingConfig
 
 
 def recognized(object_id, x, y, name="A", status="confirmed"):
@@ -106,9 +106,45 @@ def test_conveyor_session_skips_bad_frames_and_draws_overlay():
     assert canvas.shape == (100, 200, 3)
 
 
+def test_conveyor_session_maps_roi_results_back_to_full_frame():
+    matcher = FakeMatcher()
+    session = ConveyorSession(
+        matcher,
+        TrackingConfig(line_position=0.5),
+        ImageQualityConfig(min_sharpness=8.0),
+    )
+    result = session.process_frame(textured_frame(400, 240), detection_roi=(100, 40, 200, 120))
+    assert not result.skipped
+    assert result.input_image_size == (400, 240)
+    assert result.detection_roi == (100, 40, 200, 120)
+    assert result.current_count == 1
+    item = result.detection.objects[0]
+    assert item.center_x == 190.0
+    assert item.center_y == 90.0
+    assert item.box_points[0] == (180, 84)
+
+
+def test_conveyor_session_rejects_tiny_roi():
+    import pytest
+
+    session = ConveyorSession(FakeMatcher(), quality_config=ImageQualityConfig(min_sharpness=8.0))
+    with pytest.raises(ValueError, match="at least 32"):
+        session.process_frame(textured_frame(200, 100), detection_roi=(10, 10, 12, 12))
+
+
 def test_camera_source_text_parsing():
     assert OpenCVCameraSource.from_text("0").source == 0
     assert OpenCVCameraSource.from_text("video.mp4").source == "video.mp4"
+
+
+def test_camera_settings_validate_industrial_pc_options():
+    CameraSettings(width=1920, height=1080, fps=15, backend="dshow", fourcc="MJPG").validate()
+    import pytest
+
+    with pytest.raises(ValueError, match="backend"):
+        CameraSettings(backend="unknown").validate()
+    with pytest.raises(ValueError, match="FOURCC"):
+        CameraSettings(fourcc="BAD").validate()
 
 
 def test_camera_source_reads_video_file(tmp_path):

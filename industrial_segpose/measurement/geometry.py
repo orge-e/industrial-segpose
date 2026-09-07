@@ -1,3 +1,5 @@
+"""目标测量：计算轮廓、外接框和旋转矩形等几何结果。"""
+
 import cv2
 import numpy as np
 
@@ -9,3 +11,4 @@ def largest_contour(mask: np.ndarray) -> np.ndarray | None:
 
 def touches_border(mask: np.ndarray) -> bool:
     return bool(np.any(mask[0]) or np.any(mask[-1]) or np.any(mask[:, 0]) or np.any(mask[:, -1]))
+"""目标测量：计算轮廓、外接框和旋转矩形等几何结果。"""

@@ -29,6 +29,10 @@ class ObjectResult:
     height_px: float
     aspect_ratio: float
     touches_border: bool
+    contour_points: list[list[float]] = field(default_factory=list)
+    axis_angle_deg: float | None = None
+    directed_angle_deg: float | None = None
+    direction_confidence: float | None = None
     mask_filename: str | None = None
     _mask: np.ndarray | None = field(default=None, repr=False, compare=False)
 
@@ -57,6 +61,8 @@ class ImageResult:
     success: bool = True
     error_message: str | None = None
     rejected_instances: list[RejectedInstance] = field(default_factory=list)
+    coordinate_system: str = "original_bottom_left_x_right_y_up"
+    mask_raster_coordinate_system: str = "original_top_left_row_major"
 
     def to_dict(self) -> dict[str, Any]:
         return {

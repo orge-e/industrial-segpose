@@ -8,8 +8,9 @@ from typing import Iterable
 import cv2
 import numpy as np
 
+from ..measurement.coordinates import output_directed_angle_from_cv
 from .library import LoadedTemplateEntry, TemplateLibrary
-from .matcher import TemplateMatch, TemplateMatcher, _rotated_iou
+from .matcher import MatchSceneContext, TemplateMatch, TemplateMatcher, _rotated_iou
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,11 @@ class RecognizedObject:
     box_points: tuple[tuple[float, float], ...]
     contour_points: tuple[tuple[float, float], ...]
     candidate_templates: tuple[TemplateCandidateScore, ...]
+    pick_point_x: float | None = None
+    pick_point_y: float | None = None
+    safe_radius_px: float | None = None
+    orientation_confidence: float | None = None
+    auto_pick_allowed: bool = False
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -43,6 +49,25 @@ class RecognizedObject:
         payload["box_points"] = [list(point) for point in self.box_points]
         payload["contour_points"] = [list(point) for point in self.contour_points]
         payload["candidate_templates"] = [asdict(item) for item in self.candidate_templates]
+        return payload
+
+    def to_output_dict(self, image_height: int) -> dict:
+        """Serialize this match in original-image bottom-left coordinates."""
+        if image_height < 1:
+            raise ValueError("Image height must be positive")
+
+        def output_point(point: tuple[float, float]) -> list[float]:
+            return [float(point[0]), float((image_height - 1) - point[1])]
+
+        payload = self.to_dict()
+        payload["center_y"] = float((image_height - 1) - self.center_y)
+        payload["angle_deg"] = output_directed_angle_from_cv(self.angle_deg)
+        payload["directed_angle_deg"] = payload["angle_deg"]
+        payload["axis_angle_deg"] = float(payload["angle_deg"] % 180.0)
+        payload["box_points"] = [output_point(point) for point in self.box_points]
+        payload["contour_points"] = [output_point(point) for point in self.contour_points]
+        if self.pick_point_y is not None:
+            payload["pick_point_y"] = float((image_height - 1) - self.pick_point_y)
         return payload
 
 
@@ -56,6 +81,7 @@ class MultiTemplateResult:
     source_image_size: tuple[int, int] | None = None
     processing_image_size: tuple[int, int] | None = None
     processing_scale: float = 1.0
+    debug_images: dict[str, np.ndarray] | None = None
 
     @property
     def object_count(self) -> int:
@@ -75,6 +101,30 @@ class MultiTemplateResult:
             },
             "objects": [item.to_dict() for item in self.objects],
         }
+
+    def to_output_dict(self) -> dict:
+        """Return business-facing results in the unified output coordinates."""
+        if self.source_image_size is None:
+            raise ValueError("Source image size is required for output-coordinate export")
+        width, height = self.source_image_size
+        payload = self.to_dict()
+        payload["coordinate_system"] = {
+            "space": "original_image",
+            "origin": "bottom_left",
+            "x_axis": "right",
+            "y_axis": "up",
+            "pixel_center_reference": True,
+            "image_width": int(width),
+            "image_height": int(height),
+            "angle_type": "directed",
+            "angle_unit": "degree",
+            "angle_zero_axis": "positive_x",
+            "angle_positive_direction": "counter_clockwise",
+            "directed_angle_range": [0.0, 360.0],
+            "axis_angle_range": [0.0, 180.0],
+        }
+        payload["objects"] = [item.to_output_dict(height) for item in self.objects]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -123,6 +173,7 @@ class MultiTemplateMatcher:
         if not self._matchers:
             raise ValueError("No valid enabled templates are available")
         processing_image, processing_scale = self._prepare_detection_image(image)
+        scene_context = MatchSceneContext(processing_image)
         scored: list[_ScoredMatch] = []
         errors: dict[str, str] = {
             item.entry.name: item.error
@@ -134,12 +185,6 @@ class MultiTemplateMatcher:
             entry = loaded.entry
             if not entry.enabled or not loaded.valid:
                 continue
-            used_templates.append({
-                "template_id": entry.template_id,
-                "template_name": entry.name,
-                "template_file": entry.template_file,
-                "parameters": asdict(entry.parameters),
-            })
             try:
                 matcher = self._matchers[entry.template_id]
                 if processing_scale < 1.0:
@@ -150,7 +195,24 @@ class MultiTemplateMatcher:
                         scale_step=entry.parameters.scale_step * processing_scale,
                     )
                     matcher = TemplateMatcher(loaded.model, parameters)
-                matches = matcher.match(processing_image)
+                used_templates.append({
+                    "template_id": entry.template_id,
+                    "template_name": entry.name,
+                    "template_file": entry.template_file,
+                    "parameters": asdict(entry.parameters),
+                    "resolved_feature_mode": getattr(
+                        matcher, "resolved_feature_mode", entry.parameters.feature_mode
+                    ),
+                    "feature_mode_reason": (
+                        matcher.feature_recommendation.reason
+                        if getattr(matcher, "feature_recommendation", None) is not None
+                        else "模板显式指定"
+                    ),
+                })
+                if isinstance(matcher, TemplateMatcher):
+                    matches = matcher.match(processing_image, context=scene_context)
+                else:
+                    matches = matcher.match(processing_image)
                 if processing_scale < 1.0:
                     matches = [self._restore_source_coordinates(item, processing_scale) for item in matches]
             except Exception as exc:
@@ -279,11 +341,19 @@ def draw_multi_template_matches(image: np.ndarray, result: MultiTemplateResult) 
     box_thickness = max(2, int(round(1.3 * visual_scale)))
     marker_size = max(24, int(round(20 * visual_scale)))
     marker_thickness = max(3, int(round(1.8 * visual_scale)))
-    font_scale = min(2.4, max(0.78, longest_edge / 1500.0))
+    # High-resolution industrial images are normally displayed downscaled.
+    # A capped font remains readable without covering neighbouring instances
+    # in dense nesting layouts.
+    font_scale = min(1.30, max(0.68, longest_edge / 3000.0))
     text_thickness = max(2, int(round(1.5 * visual_scale)))
     text_margin = max(5, int(round(4 * visual_scale)))
-    summary = f"Total: {result.object_count}  Ambiguous: {result.ambiguous_count}"
-    summary_scale = min(2.4, max(0.82, longest_edge / 1600.0))
+    pickable_count = sum(item.auto_pick_allowed for item in result.objects)
+    blocked_count = result.object_count - pickable_count
+    summary = (
+        f"Total: {result.object_count}  Pickable: {pickable_count}  "
+        f"Blocked: {blocked_count}  Ambiguous: {result.ambiguous_count}"
+    )
+    summary_scale = min(1.55, max(0.82, longest_edge / 2800.0))
     summary_thickness = max(2, int(round(1.4 * visual_scale)))
     summary_size, summary_baseline = cv2.getTextSize(summary, cv2.FONT_HERSHEY_SIMPLEX, summary_scale, summary_thickness)
     header_height = summary_size[1] + summary_baseline + 2 * text_margin
@@ -301,7 +371,15 @@ def draw_multi_template_matches(image: np.ndarray, result: MultiTemplateResult) 
         cv2.polylines(canvas, [box], True, color, box_thickness, cv2.LINE_AA)
         center = (int(round(item.center_x)), int(round(item.center_y)))
         cv2.drawMarker(canvas, center, (0, 0, 255), cv2.MARKER_CROSS, marker_size, marker_thickness)
-        label = f"#{item.object_id} {item.template_name} {item.angle_deg:.1f}deg {item.score:.3f}"
+        if item.pick_point_x is not None and item.pick_point_y is not None and item.auto_pick_allowed:
+            pick = (int(round(item.pick_point_x)), int(round(item.pick_point_y)))
+            radius = max(6, int(round(item.safe_radius_px or marker_size * 0.4)))
+            cv2.circle(canvas, pick, radius, (0, 255, 255), max(2, box_thickness), cv2.LINE_AA)
+            cv2.drawMarker(canvas, pick, (0, 255, 255), cv2.MARKER_TILTED_CROSS, marker_size, marker_thickness)
+        safety_label = "PICK" if item.auto_pick_allowed else "NO-PICK"
+        if item.classification_status == "occluded":
+            safety_label = "OCCLUDED"
+        label = f"#{item.object_id} {item.template_name} A:{item.angle_deg:.1f} {safety_label}"
         text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
         min_x, max_x = int(box[:, 0].min()), int(box[:, 0].max())
         min_y, max_y = int(box[:, 1].min()), int(box[:, 1].max())

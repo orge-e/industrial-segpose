@@ -1,7 +1,7 @@
 from industrial_segpose.io.image_reader import read_image
-from industrial_segpose.template_demo import prepare_template_demo
+from industrial_segpose.ui_tk.demo import prepare_template_demo
 from industrial_segpose.template_matching import MultiTemplateMatcher, TemplateLibrary
-from industrial_segpose.template_ui import _application_data_root
+from industrial_segpose.ui_tk.app import _application_data_root
 
 
 def test_template_demo_prepares_assets_and_detects_expected_counts(tmp_path):

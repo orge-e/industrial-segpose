@@ -1,4 +1,4 @@
-"""Wire protocol shared by the workstation, K230 and controller simulators."""
+"""Wire protocol shared by the vision workstation and controller."""
 
 from .messages import (
     PROTOCOL_VERSION,
