@@ -1,7 +1,9 @@
 # FlexPose Vision Prototype — Visual Refinement Baseline
 
-Status: **Design Freeze Candidate**  
-Review size: **1440 × 900**  
+Status: **Design Freeze Candidate**
+
+Review size: **1440 × 900**
+
 Scope: isolated PySide6 mockup only
 
 ## Final refinement changes

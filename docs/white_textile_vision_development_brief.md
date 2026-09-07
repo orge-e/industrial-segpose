@@ -1,8 +1,11 @@
 # 白色纺织裁片视觉识别与吸取项目开发资料
 
-版本：V1.0  
-日期：2026-08-11  
-对应开发分支：`codex/white-textile-recognition`  
+版本：V1.0
+
+日期：2026-08-11
+
+对应开发分支：`codex/white-textile-recognition`
+
 稳定基线分支：`Pink`
 
 ## 1. 项目背景
