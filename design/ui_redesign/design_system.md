@@ -75,4 +75,3 @@ the approved Lucide SVG asset set.
   remains clean while the drawer is closed.
 - Results table selection represents choosing a detected object and updates the
   selected-object inspection concept.
-
