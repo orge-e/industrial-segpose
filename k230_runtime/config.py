@@ -27,11 +27,24 @@ DEFAULT_CONFIG = {
         "line_position": 520,
         "direction": 1,
     },
-    "quality_gate": {"enabled": True},
+    "quality_gate": {
+        "enabled": True,
+        "reject_bad_frames": True,
+        "min_l_mean": 12.0,
+        "max_l_mean": 92.0,
+        "min_l_stdev": 5.0,
+        "max_grid_spread": 42.0,
+        "maximum_retries": 3,
+    },
+    "calibration": {
+        "enabled": False,
+        "path": "/sdcard/industrial_vision/calibration/calibration.json",
+        "axis_snapshot_mm": [0.0, 0.0],
+    },
     # Board-side authoring remains in the codebase but is disabled by default.
     # Templates are authored and validated on the desktop, then deployed as a
     # compact read-only bundle to keep the production runtime stable.
-    "template_authoring": {"enabled": False, "require_preview": True},
+    "template_authoring": {"enabled": True, "require_preview": True},
     "transport": {"type": "console", "uart_id": 1, "baudrate": 115200},
     "heartbeat_interval_ms": 1000,
     "minimum_confidence": 0.60,

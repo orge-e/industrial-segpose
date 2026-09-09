@@ -6,6 +6,14 @@ rotation/scale correlation is too expensive for a MicroPython production loop.
 
 import math
 
+from shared_protocol.target_flags import (
+    FLAG_LOW_CONFIDENCE,
+    FLAG_PICK_AREA_INSUFFICIENT,
+    FLAG_TEMPLATE_CONFLICT,
+    FLAG_TOUCHES_BORDER,
+    auto_pick_allowed,
+)
+
 
 def normalize_angle(angle):
     value = float(angle)
@@ -16,6 +24,12 @@ def normalize_angle(angle):
     return value
 
 
+def normalize_angle_360(angle):
+    """Normalize a pose to the automation-friendly range [0, 360)."""
+    value = float(angle) % 360.0
+    return value + 360.0 if value < 0.0 else value
+
+
 def normalize_gripper_angle(angle):
     """Normalize principal-axis pose because a blob axis is 180-degree periodic."""
     value = normalize_angle(angle)
@@ -24,6 +38,20 @@ def normalize_gripper_angle(angle):
     elif value < -90.0:
         value += 180.0
     return value
+
+
+def _directed_blob_angle(x, y, width, height, center_x, center_y, base_angle_deg):
+    """Choose between a principal axis and its 180-degree opposite."""
+    radians = math.radians(base_angle_deg)
+    unit_x, unit_y = math.cos(radians), math.sin(radians)
+    offset_x = x + width / 2.0 - center_x
+    offset_y = y + height / 2.0 - center_y
+    projection = offset_x * unit_x + offset_y * unit_y
+    if projection < 0.0:
+        base_angle_deg += 180.0
+        projection = -projection
+    confidence = _clamp(projection / max(0.25 * max(width, height), 1.0))
+    return normalize_angle_360(base_angle_deg), confidence
 
 
 def _blob_value(blob, method, index):
@@ -204,16 +232,41 @@ class BlobTemplateDetector:
         if confidence < score_threshold:
             return None
 
-        reference_angle = float(template.get("reference_angle_deg", 0.0))
-        angle = normalize_gripper_angle(math.degrees(rotation) - reference_angle)
-        pick = self._pick_point(template, center_x, center_y, angle, scale)
+        reference_angle = normalize_angle_360(template.get("reference_angle_deg", 0.0))
+        observed_angle, observed_direction_confidence = _directed_blob_angle(
+            x, y, width, height, center_x, center_y, math.degrees(rotation),
+        )
+        template_direction_confidence = float(template.get("orientation_direction_confidence", 0.0))
+        direction_confidence = min(observed_direction_confidence, template_direction_confidence)
+        direction_reliable = direction_confidence >= 0.08
+        angle = normalize_angle_360(observed_angle - reference_angle)
+        pick_points = self._pick_points(template, center_x, center_y, angle, scale)
+        pick = pick_points[0]
+        flags = 0
+        if x <= 1 or y <= 1:
+            flags |= FLAG_TOUCHES_BORDER
+        if confidence < min(1.0, score_threshold + 0.05):
+            flags |= FLAG_LOW_CONFIDENCE
+        safe_radius = float(pick.get("safe_radius_px", 0.0))
+        minimum_radius = float(template.get("pick_planning", {}).get("minimum_safe_radius_px", 3.0)) * scale
+        if safe_radius < minimum_radius:
+            flags |= FLAG_PICK_AREA_INSUFFICIENT
         return {
             "template_id": template["template_id"],
             "template_name": template.get("name", template["template_id"]),
             "confidence": _clamp(confidence),
             "image_center": [center_x, center_y],
-            "pick_point": pick,
+            "pick_point": [pick["x"], pick["y"]],
+            "primary_pick_point": pick,
+            "candidate_pick_points": pick_points[1:],
+            "safe_radius_px": safe_radius,
+            "pick_score": float(pick.get("score", 0.0)),
+            "quality_flags": flags,
+            "auto_pick_allowed": auto_pick_allowed(flags),
             "angle_deg": angle,
+            "angle_period_deg": 360 if direction_reliable else 180,
+            "angle_direction_reliable": direction_reliable,
+            "angle_direction_confidence": direction_confidence,
             "scale": scale,
             "bbox": [x, y, width, height],
             "density": density,
@@ -222,16 +275,26 @@ class BlobTemplateDetector:
             "candidate_templates": [],
         }
 
-    def _pick_point(self, template, center_x, center_y, angle_deg, scale):
+    def _pick_points(self, template, center_x, center_y, angle_deg, scale):
         reference = template.get("reference_center_xy", [template.get("width", 1) / 2, template.get("height", 1) / 2])
-        pick = template.get("pick_point_xy", reference)
-        dx = (float(pick[0]) - float(reference[0])) * scale
-        dy = (float(pick[1]) - float(reference[1])) * scale
         radians = math.radians(angle_deg)
-        return [
-            center_x + dx * math.cos(radians) - dy * math.sin(radians),
-            center_y + dx * math.sin(radians) + dy * math.cos(radians),
-        ]
+        candidates = template.get("pick_points") or [{
+            "x": template.get("pick_point_xy", reference)[0],
+            "y": template.get("pick_point_xy", reference)[1],
+            "safe_radius_px": template.get("pick_radius_px", 0.0),
+            "score": 1.0,
+        }]
+        output = []
+        for candidate in candidates[:3]:
+            dx = (float(candidate.get("x", reference[0])) - float(reference[0])) * scale
+            dy = (float(candidate.get("y", reference[1])) - float(reference[1])) * scale
+            output.append({
+                "x": center_x + dx * math.cos(radians) - dy * math.sin(radians),
+                "y": center_y + dx * math.sin(radians) + dy * math.cos(radians),
+                "safe_radius_px": float(candidate.get("safe_radius_px", 0.0)) * scale,
+                "score": float(candidate.get("score", 0.0)),
+            })
+        return output
 
     @staticmethod
     def _scene_l_median(frame):
@@ -298,6 +361,13 @@ class BlobTemplateDetector:
                 continue
             candidate = self._candidate(blob, template)
             if candidate is not None:
+                try:
+                    x, y, width, height = candidate["bbox"]
+                    if x + width >= int(frame.width()) - 1 or y + height >= int(frame.height()) - 1:
+                        candidate["quality_flags"] |= FLAG_TOUCHES_BORDER
+                        candidate["auto_pick_allowed"] = False
+                except Exception:
+                    pass
                 output.append(candidate)
         return output
 
@@ -333,6 +403,8 @@ class BlobTemplateDetector:
             if len(group) > 1 and group[0]["template_id"] != group[1]["template_id"]:
                 if group[0]["confidence"] - group[1]["confidence"] < self.ambiguity_margin:
                     winner["status"] = "ambiguous"
+                    winner["quality_flags"] = int(winner.get("quality_flags", 0)) | FLAG_TEMPLATE_CONFLICT
+                    winner["auto_pick_allowed"] = False
             resolved.append(winner)
         resolved.sort(key=lambda item: (item["image_center"][1], item["image_center"][0]))
         return resolved

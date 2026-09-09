@@ -58,7 +58,7 @@ def test_detection_overlay_uses_center_crop_when_zoomed():
     assert draw_calls == [("draw_image", ("crop", (160, 120, 320, 240)), 0, 0, {"x_scale": 2.0, "y_scale": 2.0})]
 
 
-def test_detection_overlay_shows_template_pose_and_both_count_meanings():
+def test_detection_overlay_shows_template_pose_and_current_frame_count():
     image = FakeImage()
     detection = {
         "track_id": 7,
@@ -69,6 +69,10 @@ def test_detection_overlay_shows_template_pose_and_both_count_meanings():
         "image_center": [190.0, 165.0],
         "angle_deg": 32.5,
         "confidence": 0.91,
+        "primary_pick_point": {"x": 205.0, "y": 170.0, "safe_radius_px": 12.0, "score": 1.0},
+        "safe_radius_px": 12.0,
+        "quality_flags": 0,
+        "auto_pick_allowed": True,
     }
 
     DetectionOverlay().draw(
@@ -79,13 +83,19 @@ def test_detection_overlay_shows_template_pose_and_both_count_meanings():
     texts = [call[1][3] for call in image.calls if call[0] == "text"]
     assert any("TYPE:Pink_Textile" in value for value in texts)
     assert any("C:(190,165) A:32.5 S:0.91" in value for value in texts)
-    assert any("NOW:1  LINE TOTAL:4" in value for value in texts)
-    assert any("CURRENT: Pink_Textile:1" in value for value in texts)
+    assert any("COUNT:1  FPS:12.0" in value for value in texts)
+    assert any("TYPES: Pink_Textile:1" in value for value in texts)
+    assert not any("LINE TOTAL" in value or "LINE:" in value for value in texts)
     assert "DETECTION RESULT" in texts
-    assert any("#7 OK TYPE:Pink_Textile" in value for value in texts)
-    assert any("POS X:190  Y:165" in value for value in texts)
-    assert any("ANGLE:32.5  SCORE:0.91" in value for value in texts)
+    assert any("TYPE: Pink_Textile" in value for value in texts)
+    assert any("ID:7 OK  X:190 Y:165" in value for value in texts)
+    assert any("ANGLE:32.5 P:180? SCORE:0.91" in value for value in texts)
+    assert any("PICK:205,170 R:12.0 F:0" in value for value in texts)
     assert not any("12345678" in value for value in texts)
+    assert not any(call[0] == "draw_line" for call in image.calls)
+    type_calls = [call for call in image.calls if call[0] == "text" and "TYPE:" in call[1][3]]
+    assert type_calls
+    assert all(call[2]["color"] == (255, 255, 255, 255) for call in type_calls)
 
 
 def test_detection_overlay_hides_internal_template_id_when_name_is_empty():

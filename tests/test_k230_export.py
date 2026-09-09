@@ -47,11 +47,17 @@ def test_export_compact_k230_template_bundle(tmp_path):
     assert max(template["width"], template["height"]) <= 256
     assert template["parameters"]["score_threshold"] == 0.66
     assert template["pick_radius_px"] > 10
+    assert 1 <= len(template["pick_points"]) <= 3
+    assert template["pick_planning"]["method"] == "distance_transform_local_maxima"
+    assert template["pick_points"][0]["safe_radius_px"] == template["pick_radius_px"]
     assert template["segmentation"]["lab_thresholds"]
     assert "discriminative_channel" in template["segmentation"]
     assert template["shape_features"]["elongation"] >= 0.0
     assert 0.0 < template["shape_features"]["solidity"] <= 1.0
     assert template["reference_angle_deg"] != 0.0
+    assert 0.0 <= template["reference_angle_deg"] < 360.0
+    assert template["orientation_period_deg"] in (180, 360)
+    assert 0.0 <= template["orientation_direction_confidence"] <= 1.0
     assert cv2.imread(template["asset_paths"]["pose"], cv2.IMREAD_GRAYSCALE).shape == (192, 192)
     mask_image = cv2.imread(template["asset_paths"]["mask"], cv2.IMREAD_GRAYSCALE)
     pick_x, pick_y = map(lambda value: int(round(value)), template["pick_point_xy"])
@@ -75,6 +81,26 @@ def test_export_requires_explicit_overwrite(tmp_path):
         export_k230_bundle(library.root, output)
 
     assert (output / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_export_keeps_disabled_templates_in_bundle(tmp_path):
+    image = np.full((80, 140, 3), 170, np.uint8)
+    mask = np.zeros((80, 140), np.uint8)
+    cv2.rectangle(mask, (15, 15), (125, 65), 255, -1)
+    library = TemplateLibrary(tmp_path / "templates")
+    first = library.add_model(TemplateModel("enabled-part", image, mask=mask))
+    second = library.add_model(TemplateModel("disabled-part", image, mask=mask))
+    library.set_enabled(second.template_id, False)
+
+    manifest_path = export_k230_bundle(library.root, tmp_path / "bundle")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    board_library = K230TemplateLibrary(str(manifest_path)).load()
+
+    assert len(manifest["templates"]) == 2
+    assert {item["template_id"] for item in manifest["templates"]} == {first.template_id, second.template_id}
+    assert {item["enabled"] for item in manifest["templates"]} == {True, False}
+    states = {item["name"]: item["enabled"] for item in board_library.templates}
+    assert states == {"enabled-part": True, "disabled-part": False}
 
 
 def test_k230_library_can_toggle_and_remove_without_deleting_assets(tmp_path):

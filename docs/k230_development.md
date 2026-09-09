@@ -2,7 +2,7 @@
 
 ## 当前交付边界
 
-桌面端负责模板编辑、批量验证和部署包生成；当前K230生产配置只负责加载已验证模板，并独立完成候选分割、多模板分类、中心/角度计算、跨帧跟踪、计数和结果显示。板端模板建立入口与代码暂时保留，但默认禁用。
+桌面端负责模板编辑、批量验证和部署包生成；K230负责加载已验证模板，并独立完成候选分割、多模板分类、中心/角度计算、跨帧跟踪、计数和结果显示。板端模板建立入口保留并默认启用，定位为现场调试工具，关键生产模板仍以电脑端验收版本为准。
 
 已经按雅博 SD 卡 v1.4.3 中的 `libs.PipeLine`、GC2093 通道配置、ST7701 显示和 `TOUCH(0)` 接口完成适配。当前入口是安全的 `dry-run`：只在屏幕和控制台输出结果，不控制吸盘。实际帧率、阈值和角度精度仍需连接真实模块后标定。
 
@@ -41,9 +41,29 @@ industrial_vision/
   shared_protocol/
 ```
 
-在 CanMV 中手动运行 `/sdcard/industrial_vision/main.py`。设备界面名称默认为 `FlexPose Vision｜柔性工件定位系统`，可在 `device_config.json` 的 `ui` 节点修改。检测页底部提供放大、缩小、适应画面、拍摄原图和计数清零按钮。当前 `template_authoring.enabled=false`：模板库页面仍可查看模板和启用/停用模板，但不会启动板端拍摄、冻结或分割流程。模板应在电脑端建立、验证并随部署包导入。
+在 CanMV 中手动运行 `/sdcard/industrial_vision/main.py`。设备界面名称默认为 `FlexPose Vision｜柔性工件定位系统`，可在 `device_config.json` 的 `ui` 节点修改。检测页底部提供放大、缩小、适应画面、拍摄原图和刷新识别按钮。“刷新识别”只清除短时目标跟踪状态，不影响模板库，也不涉及累计计数。`template_authoring.enabled=true`时可进入板端调试建模；拍摄后只使用冻结帧，并可切换原图、分割Mask和叠加预览。
 
-检测框标签使用`TYPE:<模板名称>`显示工件类别，并显示目标流水号、状态、中心坐标、角度和置信度。画面右侧固定的`DETECTION RESULT`面板逐项显示`TYPE`模板类型、`POS X/Y`图像中心坐标、`ANGLE`旋转角度和`SCORE`置信度，避免随目标移动的标签被边界裁切。内部模板 UUID 不在屏幕上显示；模板名称缺失时显示`Unnamed_Template`，避免把内部哈希误认为类别。完整模板 ID 仍保留在控制台心跳的`current_objects`和`pick_target`协议中。`NOW`是当前画面识别数量，`LINE TOTAL`是工件通过计数线后的累计数量。
+每次在K230上成功保存模板后，程序会把完整分割中间过程写入以下目录，并在下一次建模时覆盖旧结果，避免长期占用SD卡：
+
+```text
+/sdcard/industrial_vision/diagnostics/latest_template/
+  00_frozen_frame.jpg
+  01_roi_original.bmp
+  10_candidate_00_assisted_roi.bmp
+  10_candidate_01_color.bmp ...
+  20_template_crop.bmp
+  21_final_mask.bmp
+  22_gray.bmp
+  23_edge.bmp
+  24_pose.bmp
+  segmentation_debug.json
+```
+
+其中JSON记录ROI、LAB基础阈值、所有候选阈值、候选Blob位置/面积/覆盖率及最终选中的分割方式。电脑端“K230模板工作台”点击“同步分割诊断”即可经WPD/MTP复制到`build/k230_diagnostic_cache/`；需要远程分析时，应提交整个`latest_template`目录，而不只是最终Mask。
+
+检测前的图像质量门控由`quality_gate`配置。`QUALITY:RETRY`表示当前帧因曝光、对比度或光照均匀性问题被拒绝并正在获取下一帧；超过`maximum_retries`后变为`QUALITY:ALARM`，不会输出该帧目标。状态恢复后自动回到`QUALITY:OK`。质量事件日志采用256 KB轮转上限。
+
+检测框标签使用高对比白色 `TYPE:<模板名称>` 显示工件类别，并显示目标流水号、状态、中心坐标、角度和置信度。画面右侧固定的 `DETECTION RESULT` 面板逐项显示 `TYPE` 模板类型、`X/Y` 图像中心坐标、`ANGLE` 旋转角度和 `SCORE` 置信度，避免随目标移动的标签被边界裁切。内部模板 UUID 不在屏幕上显示；模板名称缺失时显示 `Unnamed_Template`，避免把内部哈希误认为类别。完整模板 ID 仍保留在控制台心跳的 `current_objects` 和 `pick_target` 协议中。`COUNT` 是当前画面识别数量，`TYPES` 是当前画面内各模板类型的数量；刷新下一帧时会直接重新计算，不累计整条产线的历史数量。
 
 “拍摄原图”保存未经标注的相机帧，目录按日期自动归档：
 
@@ -51,7 +71,7 @@ industrial_vision/
 /sdcard/industrial_vision/captures/session_NNNN/IMG_NNNNNN.jpg
 ```
 
-建议每类工件至少采集正曝光、欠曝光、过曝光、不同位置和不同角度的图像，用于桌面端回放标定。板端检测使用曝光容差 LAB 分割、旋转不变主轴尺寸、面积尺度一致性和模板独立阈值；输出角度为适合吸盘末端旋转的 `[-90°, 90°)` 主轴角。
+建议每类工件至少采集正曝光、欠曝光、过曝光、不同位置和不同角度的图像，用于桌面端回放标定。板端检测使用曝光容差 LAB 分割、旋转不变主轴尺寸、面积尺度一致性和模板独立阈值；搜索覆盖完整360°，输出角度统一为`[0°, 360°)`。对能够由轮廓区分头尾的不对称工件输出`angle_period_deg=360`；对近似对称工件明确输出`angle_period_deg=180`和`angle_direction_reliable=false`。
 
 ## 开机自动进入软件
 
@@ -90,16 +110,16 @@ industrial_vision/
 2. 将整个会话目录复制到电脑，在桌面UI中修订mask、名称、吸取点和匹配参数。
 3. 在电脑端导出带LAB前景/背景统计、区分通道和形状特征的轻量模板包。
 4. 先用现场原图离线验证，再把通过验证的整个`templates/`目录复制到K230。
-5. 当前阶段不在K230端建立模板；所有模板必须在电脑端查看Mask、完成批量回放验证，再导出到模块模板库。
+5. K230端建模适合现场快速调试；正式模板仍应在电脑端查看Mask、完成批量回放验证，再导出到模块模板库。
 
 ### 桌面图形化流程
 
 启动`python -m industrial_segpose.template_ui`，在“建立模板”页打开“K230采集图像 / 模板工作台”：
 
-1. 目录框可以选择SD卡根目录、`industrial_vision`、`captures`或复制到电脑的单个会话目录。
+1. 目录框可以选择带盘符的SD卡根目录、`industrial_vision`、`captures`或复制到电脑的单个会话目录。若Windows只显示CanMV便携设备，使用“从已连接K230同步”按钮，经WPD/MTP复制到项目缓存后读取。
 2. “设为基准图并自动分割”把所选原图送入电脑端自动定位、初始Mask和画笔修正流程。
 3. 保存模板后，多选不同曝光、位置和角度的图像，点击“批量验证所选图像”。报告位于`reports/k230_workbench/<时间>/`。
-4. 点击“生成完整K230部署包”，程序检查至少存在一个有效且启用的模板，然后生成`build/k230_sdcard/industrial_vision/`。
+4. 回到主“建立模板”页面点击“生成完整K230部署包”。程序检查至少存在一个启用模板，并将全部有效模板（包括当前停用模板）写入`build/k230_sdcard/industrial_vision/`；停用状态会原样保留。
 
 工作台直接读取源照片但不会复制它们。最终部署包只包含运行时、设备配置和压缩后的模板资产，避免占用模块约511 MB的存储空间。
 

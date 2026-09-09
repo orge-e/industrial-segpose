@@ -9,6 +9,20 @@ from .messages import (
     make_pick_target,
     validate_message,
 )
+from .target_flags import (
+    AUTO_PICK_BLOCKING_FLAGS,
+    FLAG_DUPLICATE,
+    FLAG_IMAGE_QUALITY,
+    FLAG_LOW_CONFIDENCE,
+    FLAG_PICK_AREA_INSUFFICIENT,
+    FLAG_SIZE_ABNORMAL,
+    FLAG_SUSPECTED_OVERLAP,
+    FLAG_TEMPLATE_CONFLICT,
+    FLAG_TOUCHES_BORDER,
+    FLAG_UNREACHABLE,
+    auto_pick_allowed,
+    flag_names,
+)
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -18,4 +32,16 @@ __all__ = [
     "make_pick_ack",
     "make_pick_target",
     "validate_message",
+    "AUTO_PICK_BLOCKING_FLAGS",
+    "FLAG_DUPLICATE",
+    "FLAG_IMAGE_QUALITY",
+    "FLAG_LOW_CONFIDENCE",
+    "FLAG_PICK_AREA_INSUFFICIENT",
+    "FLAG_SIZE_ABNORMAL",
+    "FLAG_SUSPECTED_OVERLAP",
+    "FLAG_TEMPLATE_CONFLICT",
+    "FLAG_TOUCHES_BORDER",
+    "FLAG_UNREACHABLE",
+    "auto_pick_allowed",
+    "flag_names",
 ]

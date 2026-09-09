@@ -28,7 +28,13 @@ def test_template_wizard_captures_and_previews_before_manual_roi():
     ui.auto_roi = (0, 0, 640, 480)
     ui.template_preview = {"valid": True}
     assert ui.selected_roi() == (0, 0, 640, 480)
-    assert ui.process_tap(300, 430) == "manual_roi"
+    assert ui.process_tap(180, 430) == "preview_original"
+    assert ui.preview_view == "original"
+    assert ui.process_tap(300, 430) == "preview_mask"
+    assert ui.preview_view == "mask"
+    assert ui.process_tap(360, 430) == "preview_overlay"
+    assert ui.preview_view == "overlay"
+    assert ui.process_tap(450, 430) == "manual_roi"
     assert ui.page == "roi"
     assert ui.process_tap(100, 100) == "roi_first"
     assert ui.process_tap(400, 350) == "roi_ready"
@@ -59,7 +65,7 @@ def test_detection_controls_and_home_button():
     assert ui.process_tap(250, 450) == "zoom_out"
     assert ui.zoom == 1.0
     assert ui.process_tap(430, 450) == "capture_frame"
-    assert ui.process_tap(570, 450) == "reset_count"
+    assert ui.process_tap(570, 450) == "reset_tracking"
     assert ui.process_tap(50, 450) == "home"
     assert ui.page == "home"
 
@@ -79,10 +85,10 @@ def test_production_ui_keeps_template_library_read_only():
     assert ui.process_tap(420, 430, 2) == "authoring_disabled"
 
 
-def test_device_default_uses_desktop_authored_template_library():
+def test_device_default_preserves_debug_template_authoring():
     from k230_runtime.config import load_config
 
-    assert load_config()["template_authoring"]["enabled"] is False
+    assert load_config()["template_authoring"]["enabled"] is True
 
 
 def test_invalid_template_preview_cannot_be_saved():

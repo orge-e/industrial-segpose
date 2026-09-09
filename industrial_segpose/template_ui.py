@@ -16,6 +16,7 @@ import numpy as np
 
 from . import __version__
 from .camera import OpenCVCameraSource
+from .calibration_ui import CalibrationWorkbench
 from .io.image_reader import read_image
 from .k230_workbench import (
     K230CaptureImage,
@@ -40,6 +41,7 @@ from .template_matching import (
 )
 from .template_demo import prepare_template_demo
 from .tracking import TrackingConfig
+from .wpd_sync import sync_canmv_captures, sync_canmv_diagnostics
 
 
 IMAGE_TYPES = [("图像文件", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"), ("所有文件", "*.*")]
@@ -531,13 +533,10 @@ class TemplateMatchingApp(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.template_tab = ttk.Frame(self.notebook, padding=8)
         self.detect_tab = ttk.Frame(self.notebook, padding=8)
-        self.live_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(self.template_tab, text=" 1. 建立模板 ")
         self.notebook.add(self.detect_tab, text=" 2. 模板检测 ")
-        self.notebook.add(self.live_tab, text=" 3. 实时生产 ")
         self._build_template_tab()
         self._build_detect_tab()
-        self._build_live_tab()
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(12, 6), background="#E8EEF7", foreground="#40516D").pack(fill="x")
         self._refresh_library_tree()
@@ -545,39 +544,77 @@ class TemplateMatchingApp(tk.Tk):
             self.status_var.set(f"模板库加载失败：{self.library_load_error}")
 
     def _build_template_tab(self) -> None:
+        source_card = ttk.Frame(self.template_tab, padding=(16, 12), style="Card.TFrame")
+        source_card.pack(fill="x", pady=(0, 8))
+        source_text = ttk.Frame(source_card, style="Card.TFrame")
+        source_text.pack(side="left", fill="x", expand=True)
+        ttk.Label(source_text, text="01  选择基准图像", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(
+            source_text,
+            text="推荐先自动分割；需要使用设备采集图时，再进入 K230 图像工作台。",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+        source_actions = ttk.Frame(source_card, style="Card.TFrame")
+        source_actions.pack(side="right")
+        ttk.Button(
+            source_actions,
+            text="导入图片并自动分割",
+            command=lambda: self.load_reference(auto_extract=True),
+            style="Primary.TButton",
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            source_actions,
+            text="从 K230 选择采集图",
+            command=self.open_k230_workbench,
+            style="Secondary.TButton",
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            source_actions,
+            text="手动加载图片",
+            command=self.load_reference,
+            style="Secondary.TButton",
+        ).pack(side="left")
+
         workspace = ttk.Frame(self.template_tab)
-        workspace.pack(fill="both", expand=True)
-        sidebar = ttk.Frame(workspace, width=300, padding=18, style="Card.TFrame")
-        sidebar.pack(side="left", fill="y", padx=(0, 10))
+        workspace.pack(fill="both", expand=True, pady=(0, 8))
+        sidebar = ttk.Frame(workspace, width=290, padding=16, style="Card.TFrame")
+        sidebar.pack(side="left", fill="y", padx=(0, 8))
         sidebar.pack_propagate(False)
-        ttk.Label(sidebar, text="建立工件模板", style="Section.TLabel").pack(anchor="w", pady=(0, 4))
-        ttk.Label(sidebar, text="按步骤完成图像加载、轮廓提取和入库。", style="Hint.TLabel", wraplength=255).pack(anchor="w", pady=(0, 18))
-        ttk.Label(sidebar, text="01  加载基准图像", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
-        ttk.Button(sidebar, text="K230采集图像 / 模板工作台", command=self.open_k230_workbench, style="Primary.TButton").pack(fill="x", pady=(0, 6))
-        ttk.Button(sidebar, text="＋ 导入并自动绘制", command=lambda: self.load_reference(auto_extract=True), style="Primary.TButton").pack(fill="x", pady=(0, 6))
-        ttk.Button(sidebar, text="仅加载 / 手动框选", command=self.load_reference, style="Secondary.TButton").pack(fill="x", pady=(0, 18))
-        ttk.Separator(sidebar).pack(fill="x", pady=(0, 16))
-        ttk.Label(sidebar, text="02  设置工件信息", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
-        ttk.Label(sidebar, text="模板名称", style="Hint.TLabel").pack(anchor="w")
+        ttk.Label(sidebar, text="02  模板信息", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(sidebar, text="模板名称（工件类型）", style="Hint.TLabel").pack(anchor="w")
         self.template_name_var = tk.StringVar(value="")
         ttk.Entry(sidebar, textvariable=self.template_name_var).pack(fill="x", pady=(4, 12))
-        self.roi_var = tk.StringVar(value="请加载图像并拖动鼠标框选一个目标")
-        ttk.Label(sidebar, textvariable=self.roi_var, style="Hint.TLabel", wraplength=255).pack(anchor="w", pady=(0, 15))
-        ttk.Label(sidebar, text="03  提取不规则轮廓", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
-        ttk.Button(sidebar, text="编辑 / 算法辅助提取", command=self.edit_template_shape, style="Secondary.TButton").pack(fill="x", pady=(0, 18))
-        self.template_quality_var = tk.StringVar(value="Mask质量：尚未建立")
-        ttk.Label(sidebar, textvariable=self.template_quality_var, style="Hint.TLabel", wraplength=255, justify="left").pack(anchor="w", pady=(0, 14))
-        ttk.Separator(sidebar).pack(fill="x", pady=(0, 16))
-        ttk.Label(sidebar, text="04  保存到模板库", style="Section.TLabel").pack(anchor="w", pady=(0, 7))
-        ttk.Button(sidebar, text="保存并加入模板库", command=self.save_template, style="Primary.TButton").pack(fill="x")
-        ttk.Label(sidebar, text="建议：粗 ROI 四周保留少量背景，使用“纺织色度分割”获得完整轮廓，再用画笔修正。", style="Hint.TLabel", wraplength=255, justify="left").pack(side="bottom", anchor="w")
+        self.roi_var = tk.StringVar(value="请先加载图像，然后框选单个工件")
+        ttk.Label(sidebar, textvariable=self.roi_var, style="Hint.TLabel", wraplength=250).pack(anchor="w")
+        ttk.Separator(sidebar).pack(fill="x", pady=16)
+        ttk.Label(sidebar, text="03  轮廓与 Mask", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Button(
+            sidebar,
+            text="检查并修正分割轮廓",
+            command=self.edit_template_shape,
+            style="Secondary.TButton",
+        ).pack(fill="x", pady=(0, 10))
+        self.template_quality_var = tk.StringVar(value="Mask 质量：尚未建立")
+        ttk.Label(
+            sidebar,
+            textvariable=self.template_quality_var,
+            style="Hint.TLabel",
+            wraplength=250,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(
+            sidebar,
+            text="提示：粗 ROI 四周保留少量背景；自动结果不完整时再用画笔修正。",
+            style="Hint.TLabel",
+            wraplength=250,
+            justify="left",
+        ).pack(side="bottom", anchor="w")
 
         canvas_card = ttk.Frame(workspace, padding=10, style="Card.TFrame")
         canvas_card.pack(side="left", fill="both", expand=True)
         canvas_header = ttk.Frame(canvas_card, style="Card.TFrame")
         canvas_header.pack(fill="x", pady=(0, 8))
         ttk.Label(canvas_header, text="基准图像与粗 ROI", style="Section.TLabel").pack(side="left")
-        ttk.Label(canvas_header, text="在图像上按住左键拖动框选单个工件", style="Hint.TLabel").pack(side="right")
         self.reference_canvas = ImageCanvas(canvas_card, selectable=True)
         ttk.Button(canvas_header, text="放大 ＋", command=self.reference_canvas.zoom_in, style="Secondary.TButton").pack(side="right", padx=(4, 0))
         ttk.Button(canvas_header, text="缩小 －", command=self.reference_canvas.zoom_out, style="Secondary.TButton").pack(side="right", padx=(4, 0))
@@ -585,20 +622,43 @@ class TemplateMatchingApp(tk.Tk):
         self.reference_canvas.pack(fill="both", expand=True)
         self.reference_canvas.bind("<<RoiChanged>>", self._roi_changed)
 
+        action_card = ttk.Frame(self.template_tab, padding=(16, 12), style="Card.TFrame")
+        action_card.pack(fill="x")
+        action_text = ttk.Frame(action_card, style="Card.TFrame")
+        action_text.pack(side="left", fill="x", expand=True)
+        ttk.Label(action_text, text="04  保存与部署", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(
+            action_text,
+            text="保存后会加入电脑端模板库；部署包会一次性包含模板库中的全部有效模板。",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+        action_buttons = ttk.Frame(action_card, style="Card.TFrame")
+        action_buttons.pack(side="right")
+        ttk.Button(
+            action_buttons,
+            text="保存并加入模板库",
+            command=self.save_template,
+            style="Primary.TButton",
+        ).pack(side="left", padx=(0, 8))
+        self.deploy_button = ttk.Button(
+            action_buttons,
+            text="生成完整 K230 部署包",
+            command=self.build_k230_package,
+            style="Primary.TButton",
+        )
+        self.deploy_button.pack(side="left")
+
     def _build_detect_tab(self) -> None:
-        top = ttk.Frame(self.detect_tab)
+        top = ttk.Frame(self.detect_tab, padding=(12, 10), style="Card.TFrame")
         top.pack(fill="x", pady=(0, 6))
-        ttk.Button(top, text="＋ 导入模板", command=self.import_template, style="Primary.TButton").pack(side="left")
+        ttk.Label(top, text="模板库与离线验证", style="Section.TLabel").pack(side="left", padx=(0, 14))
         ttk.Button(top, text="启用/停用", command=self.toggle_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
         ttk.Button(top, text="编辑参数", command=self.edit_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
-        ttk.Button(top, text="重命名类型", command=self.rename_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
+        ttk.Button(top, text="重命名", command=self.rename_selected_template, style="Secondary.TButton").pack(side="left", padx=4)
         ttk.Button(top, text="移出模板库", command=self.remove_selected_template, style="Danger.TButton").pack(side="left", padx=4)
-        ttk.Button(top, text="重新加载", command=self.reload_library, style="Secondary.TButton").pack(side="left", padx=4)
-        self.demo_button = ttk.Button(top, text="合成自检", command=self.load_demo_case, style="Secondary.TButton")
-        self.demo_button.pack(side="left", padx=(14, 0))
-        ttk.Button(top, text="选择检测图像", command=self.load_detection_image, style="Primary.TButton").pack(side="left", padx=(14, 0))
         self.loaded_detection_var = tk.StringVar(value="未加载检测图像")
-        ttk.Label(top, textvariable=self.loaded_detection_var).pack(side="left", padx=6)
+        ttk.Button(top, text="选择检测图像", command=self.load_detection_image, style="Primary.TButton").pack(side="right")
+        ttk.Label(top, textvariable=self.loaded_detection_var, style="Hint.TLabel").pack(side="right", padx=8)
 
         library_frame = ttk.LabelFrame(self.detect_tab, text="持久模板库", padding=7, style="Card.TLabelframe")
         library_frame.pack(fill="x", pady=(0, 6))
@@ -615,7 +675,7 @@ class TemplateMatchingApp(tk.Tk):
         library_scroll.pack(side="right", fill="y")
         self.library_tree.bind("<Double-1>", lambda _event: self.toggle_selected_template())
 
-        params = ttk.LabelFrame(self.detect_tab, text="新建/导入模板的默认参数", padding=(8, 5), style="Card.TLabelframe")
+        params = ttk.LabelFrame(self.detect_tab, text="默认匹配参数", padding=(8, 5), style="Card.TLabelframe")
         params.pack(fill="x", pady=(0, 6))
         defaults = {
             "阈值": ("score", "0.72"), "最小角度": ("angle_min", "-180"),
@@ -757,6 +817,9 @@ class TemplateMatchingApp(tk.Tk):
 
     def open_k230_workbench(self) -> None:
         K230TemplateWorkbench(self)
+
+    def open_calibration_workbench(self) -> None:
+        CalibrationWorkbench(self)
 
     def auto_locate_template(self) -> None:
         if self.reference_image is None:
@@ -1292,6 +1355,42 @@ class TemplateMatchingApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc), parent=self)
 
+    def build_k230_package(self) -> None:
+        """Export the complete persistent library from the primary authoring page."""
+        output = self.data_root / "build" / "k230_sdcard"
+        self.deploy_button.configure(state="disabled")
+        self.status_var.set("正在导出完整模板库并生成K230部署包……")
+
+        def worker() -> None:
+            try:
+                result = build_workbench_deployment(self.data_root, output)
+                self.after(0, lambda result=result: done(result, None))
+            except Exception as exc:
+                self.after(0, lambda exc=exc: done(None, exc))
+
+        def done(result, error) -> None:
+            self.deploy_button.configure(state="normal")
+            if error is not None:
+                self.status_var.set("K230部署包生成失败")
+                messagebox.showerror("生成失败", str(error), parent=self)
+                return
+            app_root, check = result
+            detail = (
+                f"已导出 {check.exported_templates} 个有效模板"
+                f"（启用 {check.enabled_templates}，停用 {check.disabled_templates}）"
+            )
+            if check.invalid_templates:
+                detail += f"，跳过 {len(check.invalid_templates)} 个异常模板"
+            self.status_var.set(f"{detail}：{app_root}")
+            messagebox.showinfo(
+                "部署包已生成",
+                f"{detail}\n\n停用模板也会写入部署包，可在K230模板库中重新启用。"
+                f"\n\n复制此目录到SD卡：\n{app_root}",
+                parent=self,
+            )
+
+        threading.Thread(target=worker, daemon=True, name="k230-deployment-build").start()
+
 
 class K230TemplateWorkbench(tk.Toplevel):
     """Desktop authoring bridge for images captured by a K230 module."""
@@ -1314,7 +1413,7 @@ class K230TemplateWorkbench(tk.Toplevel):
         ttk.Label(header, text="K230 模板工作台", style="HeaderTitle.TLabel").pack(side="left")
         ttk.Label(
             header,
-            text="采集图像 → 自动分割/人工修正 → 批量回放 → 部署包",
+            text="采集图像 → 自动分割/人工修正 → 批量回放",
             style="HeaderSub.TLabel",
         ).pack(side="left", padx=18, pady=(6, 0))
 
@@ -1323,6 +1422,8 @@ class K230TemplateWorkbench(tk.Toplevel):
         ttk.Label(source, text="采集目录", style="Section.TLabel").pack(side="left", padx=(0, 8))
         ttk.Entry(source, textvariable=self.source_var).pack(side="left", fill="x", expand=True)
         ttk.Button(source, text="浏览", command=self._browse, style="Secondary.TButton").pack(side="left", padx=6)
+        ttk.Button(source, text="从已连接K230同步", command=self._sync_connected, style="Secondary.TButton").pack(side="left", padx=(0, 6))
+        ttk.Button(source, text="同步分割诊断", command=self._sync_diagnostics, style="Secondary.TButton").pack(side="left", padx=(0, 6))
         ttk.Button(source, text="扫描图像", command=self._scan, style="Primary.TButton").pack(side="left")
 
         pane = ttk.Panedwindow(self, orient="horizontal")
@@ -1359,7 +1460,6 @@ class K230TemplateWorkbench(tk.Toplevel):
         actions.pack(fill="x", padx=10, pady=10)
         ttk.Button(actions, text="① 设为基准图并自动分割", command=self._use_as_reference, style="Primary.TButton").pack(side="left")
         ttk.Button(actions, text="② 批量验证所选图像", command=self._validate_selected, style="Secondary.TButton").pack(side="left", padx=6)
-        ttk.Button(actions, text="③ 生成完整K230部署包", command=self._build_deployment, style="Primary.TButton").pack(side="left")
         ttk.Label(actions, textvariable=self.summary_var, style="Hint.TLabel", wraplength=430).pack(side="right")
 
     def _browse(self) -> None:
@@ -1367,6 +1467,34 @@ class K230TemplateWorkbench(tk.Toplevel):
         if path:
             self.source_var.set(path)
             self._scan()
+
+    def _sync_connected(self) -> None:
+        self.configure(cursor="watch")
+        self.summary_var.set("正在通过Windows便携设备接口同步K230采集图像……")
+        self.update_idletasks()
+        try:
+            path = sync_canmv_captures(self.parent.data_root / "build" / "k230_capture_cache")
+            self.source_var.set(str(path))
+            self._scan()
+            self.summary_var.set(f"已从CanMV同步到本地缓存：{path}")
+        except Exception as exc:
+            messagebox.showerror("K230同步失败", str(exc), parent=self)
+        finally:
+            self.configure(cursor="")
+
+    def _sync_diagnostics(self) -> None:
+        self.configure(cursor="watch")
+        self.summary_var.set("正在同步K230最近一次模板分割诊断……")
+        self.update_idletasks()
+        try:
+            path = sync_canmv_diagnostics(self.parent.data_root / "build" / "k230_diagnostic_cache")
+            self.source_var.set(str(path))
+            self._scan()
+            self.summary_var.set(f"诊断文件已同步：{path}；可将整个目录交给Codex分析")
+        except Exception as exc:
+            messagebox.showerror("诊断同步失败", str(exc), parent=self)
+        finally:
+            self.configure(cursor="")
 
     def _scan(self) -> None:
         try:
@@ -1402,10 +1530,15 @@ class K230TemplateWorkbench(tk.Toplevel):
         if not selected:
             messagebox.showwarning("未选择图像", "请先选择一张采集图像。", parent=self)
             return
-        self.iconify()
+        # Windows/Tk forbids iconifying a transient Toplevel.  Transfer focus
+        # to the main editor and close this workbench after handing over the
+        # selected path; the scheduled mask dialog belongs to the main window.
+        self.withdraw()
         self.parent.notebook.select(self.parent.template_tab)
         self.parent.load_reference_path(selected[0].path, auto_extract=True)
         self.parent.lift()
+        self.parent.focus_force()
+        self.destroy()
 
     def _run_background(self, label: str, task, done) -> None:
         self.summary_var.set(label)
@@ -1418,27 +1551,6 @@ class K230TemplateWorkbench(tk.Toplevel):
                 self.after(0, lambda exc=exc: done(None, exc))
 
         threading.Thread(target=worker, daemon=True).start()
-
-    def _build_deployment(self) -> None:
-        output = self.parent.data_root / "build" / "k230_sdcard"
-
-        def done(result, error) -> None:
-            if error:
-                self.summary_var.set("部署包生成失败")
-                messagebox.showerror("生成失败", str(error), parent=self)
-                return
-            app_root, check = result
-            detail = f"已导出 {check.enabled_templates} 个有效模板"
-            if check.invalid_templates:
-                detail += f"，跳过 {len(check.invalid_templates)} 个异常模板"
-            self.summary_var.set(f"{detail}：{app_root}")
-            messagebox.showinfo("部署包已生成", f"{detail}\n\n复制此目录到SD卡：\n{app_root}", parent=self)
-
-        self._run_background(
-            "正在转换模板并生成部署包……",
-            lambda: build_workbench_deployment(self.parent.data_root, output),
-            done,
-        )
 
     def _validate_selected(self) -> None:
         selected = self._selected_captures()
@@ -1473,9 +1585,9 @@ def main(argv: list[str] | None = None) -> int:
         app.withdraw()
         if (
             not hasattr(app, "library_tree")
-            or not hasattr(app, "demo_button")
-            or not hasattr(app, "live_canvas")
-            or not hasattr(app, "live_tree")
+            or not hasattr(app, "reference_canvas")
+            or not hasattr(app, "deploy_button")
+            or not hasattr(app, "detection_canvas")
             or not isinstance(app.template_library, TemplateLibrary)
         ):
             raise RuntimeError("Template library UI check failed")

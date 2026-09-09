@@ -9,7 +9,7 @@ from shared_protocol import encode_message, make_heartbeat, make_pick_target
 
 
 class DeviceVisionApp:
-    def __init__(self, config, camera, detector, tracker, overlay, transport, clock, touch_ui=None, template_builder=None, template_library=None, capture_manager=None, error_reporter=None):
+    def __init__(self, config, camera, detector, tracker, overlay, transport, clock, touch_ui=None, template_builder=None, template_library=None, capture_manager=None, error_reporter=None, quality_gate=None, calibration=None):
         self.config = config
         self.camera = camera
         self.detector = detector
@@ -22,6 +22,10 @@ class DeviceVisionApp:
         self.template_library = template_library
         self.capture_manager = capture_manager
         self.error_reporter = error_reporter
+        self.quality_gate = quality_gate
+        self.calibration = calibration
+        self.last_quality_report = None
+        self.last_quality_decision = None
         self.frames = 0
         self.rejected = 0
         self.last_heartbeat = -1
@@ -110,9 +114,12 @@ class DeviceVisionApp:
             index = min(self.touch_ui.selected_template, len(self.template_library.templates) - 1)
             self.template_library.remove(self.template_library.templates[index]["template_id"])
             self.touch_ui.selected_template = max(0, min(index, len(self.template_library.templates) - 1))
-        elif action == "reset_count":
-            self.tracker.total_count = 0
-            self.tracker.counts = {}
+        elif action == "reset_tracking":
+            # Current-frame counting needs no manual reset. This button only
+            # discards stale track identities and lets visible objects acquire
+            # fresh IDs on the next frame.
+            self.tracker.tracks = {}
+            self.tracker.next_id = 1
         elif action == "capture_frame":
             if self.capture_manager is None:
                 self.touch_ui.message = "拍摄功能未配置"
@@ -208,6 +215,13 @@ class DeviceVisionApp:
             for detection in detections[:8]:
                 name = str(detection.get("template_name", "object"))
                 current_counts[name] = current_counts.get(name, 0) + 1
+                primary = detection.get("primary_pick_point") or {}
+                world_point = None
+                if self.calibration is not None and primary:
+                    world_point = self.calibration.pixel_to_global(
+                        (primary.get("x", 0.0), primary.get("y", 0.0)),
+                        self.config.get("calibration", {}).get("axis_snapshot_mm", (0.0, 0.0)),
+                    )
                 current_objects.append({
                     "track_id": int(detection.get("track_id", 0)),
                     "template_id": str(detection.get("template_id", "")),
@@ -215,7 +229,15 @@ class DeviceVisionApp:
                     "status": str(detection.get("status", "ready")),
                     "image_center": list(detection.get("image_center", (0.0, 0.0))),
                     "angle_deg": float(detection.get("angle_deg", 0.0)),
+                    "angle_period_deg": int(detection.get("angle_period_deg", 180)),
+                    "angle_direction_reliable": bool(detection.get("angle_direction_reliable", False)),
                     "confidence": float(detection.get("confidence", 0.0)),
+                    "primary_pick_point": detection.get("primary_pick_point"),
+                    "candidate_pick_points": detection.get("candidate_pick_points", []),
+                    "safe_radius_px": float(detection.get("safe_radius_px", 0.0)),
+                    "quality_flags": int(detection.get("quality_flags", 0)),
+                    "auto_pick_allowed": bool(detection.get("auto_pick_allowed", True)),
+                    "global_pick_point_mm": world_point,
                 })
             self._write(make_heartbeat(
                 self.config.get("device_id", "k230"), now_ms, "running",
@@ -224,9 +246,10 @@ class DeviceVisionApp:
                     "current_detection_count": len(detections),
                     "current_counts_by_template": current_counts,
                     "current_objects": current_objects,
-                    "line_total": self.tracker.total_count,
-                    "counts_by_template": dict(self.tracker.counts),
+                    "frame_total": len(detections),
+                    "counts_by_template": current_counts,
                     "rejected": self.rejected,
+                    "image_quality": self.last_quality_report,
                 },
             ))
             self.last_heartbeat = now_ms
@@ -236,13 +259,34 @@ class DeviceVisionApp:
         for detection in detections:
             if not detection.get("emit", False):
                 continue
-            if detection.get("status") == "ambiguous" or detection.get("confidence", 0.0) < threshold:
+            if (
+                detection.get("status") == "ambiguous"
+                or detection.get("confidence", 0.0) < threshold
+                or not detection.get("auto_pick_allowed", True)
+            ):
                 self.rejected += 1
                 continue
+            primary = detection.get("primary_pick_point") or {}
+            world_point = None
+            if self.calibration is not None and primary:
+                world_point = self.calibration.pixel_to_global(
+                    (primary.get("x", 0.0), primary.get("y", 0.0)),
+                    self.config.get("calibration", {}).get("axis_snapshot_mm", (0.0, 0.0)),
+                )
             self._write(make_pick_target(
                 detection["track_id"], detection["template_id"], detection["template_name"],
                 detection["confidence"], detection["image_center"], detection["pick_point"],
                 detection["angle_deg"], now_ms, status="ready",
+                quality_flags=detection.get("quality_flags", 0),
+                candidate_pick_points=[
+                    [point.get("x", 0.0), point.get("y", 0.0)]
+                    for point in detection.get("candidate_pick_points", [])
+                ],
+                safe_radius_px=detection.get("safe_radius_px"),
+                auto_pick_allowed=detection.get("auto_pick_allowed", True),
+                world_point=world_point,
+                angle_period_deg=detection.get("angle_period_deg", 180),
+                angle_direction_reliable=detection.get("angle_direction_reliable", False),
             ))
 
     def _template_frame_is_frozen(self):
@@ -266,10 +310,40 @@ class DeviceVisionApp:
         detection_enabled = not hasattr(self.touch_ui, "page") or self.touch_ui.page == "detect"
         detections = []
         if detection_enabled:
-            try:
-                detections = self.tracker.update(self.detector.detect(frame, now_ms))
-            except Exception as error:
-                self._report_error(error, "detect")
+            quality_ok = True
+            if self.quality_gate is not None:
+                try:
+                    self.last_quality_report = self.quality_gate.evaluate(frame)
+                    quality_ok = bool(self.last_quality_report.get("passed", False))
+                    decision = self.last_quality_report.get("decision", "accept")
+                    if decision != self.last_quality_decision:
+                        if self.error_reporter is not None and hasattr(self.error_reporter, "event"):
+                            self.error_reporter.event("image_quality", {
+                                "decision": decision,
+                                "frame": self.frames,
+                                "issues": ",".join(self.last_quality_report.get("issues", [])) or "none",
+                                "score": "%.3f" % float(self.last_quality_report.get("score", 0.0)),
+                            })
+                        self.last_quality_decision = decision
+                    if self.touch_ui is not None:
+                        if decision == "accept":
+                            self.touch_ui.quality_status = "QUALITY:OK"
+                        else:
+                            self.touch_ui.quality_status = "QUALITY:%s %d/%d" % (
+                                decision.upper(),
+                                self.last_quality_report.get("retry_index", 0),
+                                self.last_quality_report.get("maximum_retries", 0),
+                            )
+                    if not quality_ok:
+                        self.rejected += 1
+                except Exception as error:
+                    quality_ok = False
+                    self._report_error(error, "image_quality")
+            if quality_ok:
+                try:
+                    detections = self.tracker.update(self.detector.detect(frame, now_ms))
+                except Exception as error:
+                    self._report_error(error, "detect")
         self.frames += 1
         if self.last_frame_ms is not None and now_ms > self.last_frame_ms:
             instant = 1000.0 / (now_ms - self.last_frame_ms)

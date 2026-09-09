@@ -32,10 +32,21 @@
     "direction": 1
   },
   "quality_gate": {
-    "enabled": true
+    "enabled": true,
+    "reject_bad_frames": true,
+    "min_l_mean": 12.0,
+    "max_l_mean": 92.0,
+    "min_l_stdev": 5.0,
+    "max_grid_spread": 42.0,
+    "maximum_retries": 3
+  },
+  "calibration": {
+    "enabled": false,
+    "path": "/sdcard/industrial_vision/calibration/calibration.json",
+    "axis_snapshot_mm": [0.0, 0.0]
   },
   "template_authoring": {
-    "enabled": false,
+    "enabled": true,
     "require_preview": true
   },
   "transport": {
