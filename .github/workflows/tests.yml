@@ -19,4 +19,6 @@ jobs:
       - name: Run tests
         run: python -m pytest
       - name: Verify UI construction
-        run: python -m industrial_segpose.template_ui --check
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m industrial_segpose.ui_qt.app --check

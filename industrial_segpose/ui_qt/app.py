@@ -20,6 +20,7 @@ def project_root() -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FlexPose Vision PySide6 staged desktop UI")
+    parser.add_argument("--check", action="store_true", help="construct the UI and exit without entering the event loop")
     parser.add_argument("--render", type=Path, help="save a 1440x900 review screenshot and exit")
     parser.add_argument("--page", choices=("template", "detection", "live", "validation"), default="template")
     parser.add_argument("--review-sample", action="store_true", help="load checked-in real reference assets for visual QA")
@@ -36,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     window.show_page(args.page)
     if args.review_sample:
         window.template_page.load_review_sample()
+    if args.check:
+        app.processEvents()
+        return 0
     if args.render:
         window.resize(args.width, args.height)
         window.show()
