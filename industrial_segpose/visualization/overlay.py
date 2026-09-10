@@ -1,3 +1,5 @@
+"""结果可视化：在原图上绘制 Mask、轮廓、中心和角度。"""
+
 import cv2
 import numpy as np
 from ..types import ImageResult
@@ -40,3 +42,4 @@ def draw_overlay(image: np.ndarray, result: ImageResult) -> np.ndarray:
     cv2.rectangle(canvas, (0, 0), (min(canvas.shape[1], 570), 28), (0, 0, 0), -1)
     cv2.putText(canvas, header, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, .52, (255, 255, 255), 1, cv2.LINE_AA)
     return canvas
+"""结果可视化：在原图上绘制 Mask、轮廓、中心和角度。"""

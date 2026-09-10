@@ -7,7 +7,7 @@ import pytest
 from industrial_segpose.calibration import PlanarCalibration
 from industrial_segpose.calibration.tool import run_calibration_job
 from industrial_segpose.measurement.pick_points import plan_pick_points
-from industrial_segpose.target_models import Point2D, TargetRecord
+from industrial_segpose.production.models import Point2D, TargetRecord
 from shared_protocol import (
     FLAG_PICK_AREA_INSUFFICIENT,
     FLAG_TOUCHES_BORDER,

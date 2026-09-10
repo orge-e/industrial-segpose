@@ -4,26 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "industrial-segpose"
-version = "0.9.3"
+version = "0.11.0"
 description = "Industrial instance segmentation and 2D pose measurement with OpenCV"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-dependencies = ["opencv-python>=4.8", "numpy>=1.24", "PyYAML>=6.0"]
+dependencies = ["opencv-python>=4.8", "numpy>=1.24", "PyYAML>=6.0", "SQLAlchemy>=2.0", "PySide6>=6.6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
 industrial-segpose = "industrial_segpose.cli:main"
-industrial-segpose-ui = "industrial_segpose.template_ui:main"
-industrial-segpose-export-k230 = "industrial_segpose.k230_export:main"
-industrial-segpose-validate-k230 = "industrial_segpose.k230_validation:main"
-industrial-segpose-calibrate = "industrial_segpose.calibration_cli:main"
+industrial-segpose-ui = "industrial_segpose.ui_tk.app:main"
+industrial-segpose-ui-qt = "industrial_segpose.ui_qt.app:main"
+industrial-segpose-calibrate = "industrial_segpose.calibration.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools.packages.find]
-include = ["industrial_segpose*", "k230_runtime*", "shared_protocol*"]
+include = ["industrial_segpose*", "shared_protocol*"]

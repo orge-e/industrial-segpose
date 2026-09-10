@@ -1,3 +1,5 @@
+"""分割后端：依据指定颜色空间范围提取候选目标。"""
+
 import cv2
 import numpy as np
 from .base import clean_binary, connected_instances
@@ -24,3 +26,4 @@ class ColorRangeBackend:
             binary = cv2.bitwise_not(binary)
         binary = clean_binary(binary, self.config)
         return connected_instances(binary, {"color_space": converted, "binary": binary})
+"""分割后端：依据指定颜色空间范围提取候选目标。"""

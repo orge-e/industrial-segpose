@@ -8,7 +8,7 @@ from .filtering import evaluate_instance
 from .measurement.center import calculate_center
 from .measurement.geometry import largest_contour
 from .measurement.orientation import calculate_orientation
-from .preprocessing import preprocess
+from .preprocessing.preprocessing import preprocess_with_transform
 from .segmentation import create_backend
 from .types import ImageResult, ObjectResult, RejectedInstance, SegmentationResult
 
@@ -23,7 +23,7 @@ class SegPosePipeline:
 
     def process(self, image: np.ndarray, image_name: str = "image") -> ImageResult:
         started = perf_counter()
-        work, debug = preprocess(image, self.config)
+        work, debug, transform = preprocess_with_transform(image, self.config)
         source = debug["preprocessed"]
         segmentation = self.backend.segment(source if self.backend_name != "color_range" else work)
         segmentation.debug_images = {**debug, **segmentation.debug_images}
@@ -40,14 +40,30 @@ class SegPosePipeline:
             if reasons:
                 rejected.append(RejectedInstance(source_label, reasons, geometry["area"]))
                 continue
-            center_x, center_y = calculate_center(contour, measurement["center_method"])
+            center_x_cv, center_y_cv = calculate_center(contour, measurement["center_method"])
+            center_x, center_y = transform.point_to_output(center_x_cv, center_y_cv)
             angle, confidence = calculate_orientation(contour, measurement["angle_method"])
             rect = cv2.minAreaRect(contour)
-            width, height = map(float, rect[1])
+            width = float(rect[1][0]) / transform.scale_x
+            height = float(rect[1][1]) / transform.scale_y
             long_side, short_side = max(width, height), min(width, height)
-            box = cv2.boxPoints(rect).astype(float).tolist()
-            objects.append(ObjectResult(0, center_x, center_y, angle, measurement["angle_method"], confidence >= float(measurement["min_orientation_confidence"]), confidence, geometry["area"], geometry["perimeter"], geometry["bbox"], box, long_side, short_side, long_side / max(short_side, 1e-9), geometry["touches_border"], _mask=mask))
+            box = transform.processed_to_output(cv2.boxPoints(rect)).astype(float).tolist()
+            output_contour = transform.contour_to_output(contour).reshape(-1, 2)
+            area_scale = transform.scale_x * transform.scale_y
+            length_scale = (transform.scale_x + transform.scale_y) / 2.0
+            objects.append(ObjectResult(
+                0, center_x, center_y, angle, measurement["angle_method"],
+                confidence >= float(measurement["min_orientation_confidence"]), confidence,
+                geometry["area"] / area_scale, geometry["perimeter"] / length_scale,
+                transform.bbox_to_output(geometry["bbox"]), box, long_side, short_side,
+                long_side / max(short_side, 1e-9), geometry["touches_border"],
+                contour_points=output_contour.astype(float).tolist(),
+                axis_angle_deg=angle,
+                directed_angle_deg=None,
+                direction_confidence=None,
+                _mask=transform.restore_mask(mask),
+            ))
         objects.sort(key=lambda item: (item.center_y, item.center_x))
         for object_id, obj in enumerate(objects, start=1): obj.object_id = object_id
         elapsed = (perf_counter() - started) * 1000.0
-        return ImageResult(str(image_name), work.shape[1], work.shape[0], len(objects), objects, elapsed, self.backend_name, rejected_instances=rejected)
+        return ImageResult(str(image_name), image.shape[1], image.shape[0], len(objects), objects, elapsed, self.backend_name, rejected_instances=rejected)

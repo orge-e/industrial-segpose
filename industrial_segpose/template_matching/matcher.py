@@ -10,7 +10,9 @@ import cv2
 import numpy as np
 
 from .model import TemplateModel
-from .mask_assist import extract_dark_textile_candidates
+from .mask_assist import extract_dark_textile_candidates, extract_textile_chroma_candidates
+from .feature_router import FeatureModeRecommendation, recommend_feature_mode
+from .white_textile import contour_template_feature, segment_white_textile, white_cut_seam_feature
 
 
 @dataclass(frozen=True)
@@ -48,8 +50,8 @@ class MatchParameters:
             raise ValueError("Coarse-to-fine limits must be positive")
         if self.coarse_angle_step <= 0 or self.coarse_scale_step <= 0:
             raise ValueError("Coarse-to-fine steps must be positive")
-        if self.feature_mode not in {"auto", "edges", "gray", "textile_chroma", "pose_tolerant", "dark_textile"}:
-            raise ValueError("Feature mode must be auto, edges, gray, textile_chroma, pose_tolerant, or dark_textile")
+        if self.feature_mode not in {"auto", "edges", "gray", "textile_chroma", "pose_tolerant", "dark_textile", "white_cut_seam"}:
+            raise ValueError("Unsupported feature mode")
         angle_count = int((self.angle_max - self.angle_min) / self.angle_step) + 1
         scale_count = int((self.scale_max - self.scale_min) / self.scale_step) + 1
         if angle_count * scale_count > 5000:
@@ -95,6 +97,31 @@ class _TemplateVariant:
     contour: np.ndarray
     angle: float
     scale: float
+
+
+class MatchSceneContext:
+    """Per-frame cache shared by every enabled template matcher."""
+
+    def __init__(self, image: np.ndarray):
+        if image is None or image.size == 0:
+            raise ValueError("Detection image is empty")
+        self.image = image
+        self.features: dict[tuple[str, bool], np.ndarray] = {}
+        self.candidate_masks: dict[str, np.ndarray] = {}
+
+    def ensure_image(self, image: np.ndarray) -> None:
+        if image is not self.image:
+            raise ValueError("MatchSceneContext belongs to a different image")
+
+    def feature(self, key: tuple[str, bool], builder: Callable[[], np.ndarray]) -> np.ndarray:
+        if key not in self.features:
+            self.features[key] = builder()
+        return self.features[key]
+
+    def candidates(self, key: str, builder: Callable[[], np.ndarray]) -> np.ndarray:
+        if key not in self.candidate_masks:
+            self.candidate_masks[key] = builder()
+        return self.candidate_masks[key]
 
 
 def _values(start: float, stop: float, step: float) -> list[float]:
@@ -154,12 +181,20 @@ class TemplateMatcher:
         self.model = model
         self.parameters = parameters or MatchParameters()
         self.parameters.validate()
+        self.feature_recommendation: FeatureModeRecommendation | None = None
+        if self.parameters.feature_mode == "auto":
+            self.feature_recommendation = recommend_feature_mode(model)
+            self.resolved_feature_mode = self.feature_recommendation.mode
+        else:
+            self.resolved_feature_mode = self.parameters.feature_mode
         self._variant_cache_key: MatchParameters | None = None
         self._variant_cache: list[_TemplateVariant] = []
         self._grid_variant_cache: dict[tuple, list[_TemplateVariant]] = {}
 
     @staticmethod
     def _prepare(image: np.ndarray, use_edges: bool, feature_mode: str = "auto") -> np.ndarray:
+        if feature_mode == "white_cut_seam":
+            return white_cut_seam_feature(image)[1]
         if feature_mode in {"textile_chroma", "pose_tolerant"}:
             bgr = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
@@ -187,17 +222,24 @@ class TemplateMatcher:
         self,
         image: np.ndarray,
         progress: Callable[[int, int], None] | None = None,
+        context: MatchSceneContext | None = None,
     ) -> list[TemplateMatch]:
         if image is None or image.size == 0:
             raise ValueError("Detection image is empty")
         params = self.parameters
         params.validate()
-        if params.feature_mode in {"pose_tolerant", "dark_textile"}:
-            matches = self._match_pose_tolerant(image)
+        scene_context = context or MatchSceneContext(image)
+        scene_context.ensure_image(image)
+        mode = self.resolved_feature_mode
+        if mode in {"pose_tolerant", "dark_textile", "white_cut_seam"}:
+            matches = self._match_pose_tolerant(image, scene_context)
             if progress:
                 progress(1, 1)
             return matches
-        scene = self._prepare(image, params.use_edges, params.feature_mode)
+        scene = scene_context.feature(
+            (mode, params.use_edges),
+            lambda: self._prepare(image, params.use_edges, mode),
+        )
         angle_count = len(_values(params.angle_min, params.angle_max, params.angle_step))
         scale_count = len(_values(params.scale_min, params.scale_max, params.scale_step))
         if params.coarse_to_fine and angle_count * scale_count > params.coarse_trigger_transforms:
@@ -336,14 +378,22 @@ class TemplateMatcher:
         pixels inside the stored irregular template mask.  This tolerates large
         exposure changes while rejecting neutral black/gray textile distractors.
         """
-        if self.parameters.feature_mode == "dark_textile":
+        mode = self.resolved_feature_mode
+        if mode == "dark_textile":
             return extract_dark_textile_candidates(image)
+        if mode == "white_cut_seam":
+            result = segment_white_textile(image)
+            if not result.candidate_masks:
+                return np.zeros(image.shape[:2], np.uint8)
+            return np.maximum.reduce(result.candidate_masks)
         denoised = cv2.medianBlur(image, 3)
         template_lab = cv2.cvtColor(self.model.image, cv2.COLOR_BGR2LAB)
         selected = self.model.mask > 0
         median = np.median(template_lab[selected], axis=0).astype(np.float32)
         chroma_vector = median[1:] - 128.0
         chroma_length = float(np.linalg.norm(chroma_vector))
+        if mode == "pose_tolerant" and chroma_length >= 3.0:
+            return extract_textile_chroma_candidates(image)
         scene_lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
         scene_lightness = scene_lab[:, :, 0].astype(np.float32)
         low, high = np.percentile(scene_lightness, (2.0, 98.0))
@@ -352,7 +402,11 @@ class TemplateMatcher:
         if chroma_length >= 3.0:
             chroma = scene_lab[:, :, 1:].astype(np.float32) - 128.0
             projection = np.tensordot(chroma, chroma_vector, axes=([2], [0])) / chroma_length
-            chroma_ok = projection >= max(2.5, 0.35 * chroma_length)
+            # Half the learned template chroma is a safer lower bound on the
+            # slightly colour-cast gray work surfaces. The former 35% bound
+            # merged pale yellow parts with the background, corrupting scale
+            # and angle even on the same capture used to build the template.
+            chroma_ok = projection >= max(2.5, 0.50 * chroma_length)
             # Strong exposure can wash pale pink nearly to neutral.  On a dark
             # conveyor, retain a complementary high-lightness route so the
             # silhouette survives colour clipping; shape verification later
@@ -393,14 +447,23 @@ class TemplateMatcher:
             return None
         return min(eligible, key=lambda value: abs(value - angle))
 
-    def _match_pose_tolerant(self, image: np.ndarray) -> list[TemplateMatch]:
+    def _match_pose_tolerant(
+        self,
+        image: np.ndarray,
+        context: MatchSceneContext | None = None,
+    ) -> list[TemplateMatch]:
         """Fast component-guided silhouette matching for flexible textile parts."""
         params = self.parameters
-        binary = self._pose_candidate_mask(image)
+        mode = self.resolved_feature_mode
+        if context is not None and mode in {"dark_textile", "white_cut_seam"}:
+            binary = context.candidates(mode, lambda: self._pose_candidate_mask(image))
+        else:
+            binary = self._pose_candidate_mask(image)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         dark_texture_strength: np.ndarray | None = None
-        if params.feature_mode == "dark_textile":
+        if mode == "dark_textile":
             gray_u8 = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            scene_gray_median = float(np.median(gray_u8))
             median = cv2.medianBlur(gray_u8, 3)
             cleaned = np.where(cv2.absdiff(gray_u8, median) > 28, median, gray_u8).astype(np.float32)
             local_illumination = cv2.GaussianBlur(cleaned, (0, 0), 2.0)
@@ -422,12 +485,14 @@ class TemplateMatcher:
                 area_fraction = area / max(float(image.shape[0] * image.shape[1]), 1.0)
                 touches_border = x == 0 or y == 0 or x + width == image.shape[1] or y + height == image.shape[0]
                 texture_median, texture_upper_quartile = np.percentile(dark_texture_strength[component], (50.0, 75.0))
+                component_gray_median = float(np.median(gray_u8[component]))
+                strongly_darker_than_scene = component_gray_median <= scene_gray_median - 28.0
                 # Smooth conveyor gradients can form a large template-like
                 # silhouette.  A true black textile has distributed weave
                 # energy, while that background response is both weaker and
                 # commonly connected to an image border.  Partial, very large
                 # border objects are also unsafe pickup targets.
-                if texture_median < 5.0 or texture_upper_quartile < 9.0:
+                if (texture_median < 5.0 or texture_upper_quartile < 9.0) and not strongly_darker_than_scene:
                     continue
                 if area_fraction > 0.55 or (touches_border and area_fraction > 0.12):
                     continue
@@ -454,7 +519,10 @@ class TemplateMatcher:
             y1 = min(image.shape[0], y + height + padding)
             target = component[y0:y1, x0:x1]
             best_score, best_angle, best_scale = -1.0, angle_hypotheses[0], estimated_scale
-            angle_offsets = (-4.0, -2.0, 0.0, 2.0, 4.0)
+            # PCA gives an excellent coarse pose, but low-contrast seam masks
+            # can bias it by roughly ten degrees.  A wider local refinement is
+            # still far cheaper than scanning the full 360-degree grid.
+            angle_offsets = (-12.0, -8.0, -4.0, -2.0, 0.0, 2.0, 4.0, 8.0, 12.0)
             scale_factors = (0.94, 0.97, 1.0, 1.03, 1.06)
             scale_options = sorted({
                 min(params.scale_max, max(params.scale_min, estimated_scale * factor))
@@ -544,8 +612,12 @@ class TemplateMatcher:
         cached = self._grid_variant_cache.get(key)
         if cached is not None:
             return cached
-        template = self._prepare(self.model.image, params.use_edges, params.feature_mode)
-        template_mask = self.model.mask
+        mode = self.resolved_feature_mode
+        if mode == "white_cut_seam":
+            template, template_mask = contour_template_feature(self.model.mask)
+        else:
+            template = self._prepare(self.model.image, params.use_edges, mode)
+            template_mask = self.model.mask
         reference_center = np.asarray([self.model.reference_center_xy], dtype=np.float32).reshape(-1, 1, 2)
         template_contour = self.model.contour
         variants: list[_TemplateVariant] = []
@@ -575,7 +647,10 @@ class TemplateMatcher:
                 rotated_contour = cv2.transform(scaled_contour.reshape(-1, 1, 2), matrix).reshape(-1, 2)
                 rotated_height, rotated_width = rotated.shape[:2]
                 valid_values = rotated[rotated_mask > 0]
-                if valid_values.size and float(np.std(valid_values)) > 1e-6:
+                if valid_values.size and (
+                    mode == "white_cut_seam"
+                    or float(np.std(valid_values)) > 1e-6
+                ):
                     variants.append(_TemplateVariant(rotated, rotated_mask, rotated_center, rotated_contour, float(angle), float(scale)))
         if len(self._grid_variant_cache) >= 6:
             self._grid_variant_cache.clear()
@@ -603,7 +678,11 @@ class TemplateMatcher:
                 self.model.name,
                 candidate.center_x,
                 candidate.center_y,
-                candidate.angle_deg,
+                (
+                    float(candidate.angle_deg % 360.0)
+                    if self.resolved_feature_mode == "white_cut_seam"
+                    else candidate.angle_deg
+                ),
                 candidate.score,
                 candidate.scale,
                 tuple((float(x), float(y)) for x, y in candidate.box),

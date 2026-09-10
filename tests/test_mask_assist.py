@@ -59,6 +59,22 @@ def test_textile_chroma_extracts_low_contrast_pink_shape():
     assert mask_iou(result.mask, truth) > 0.95
 
 
+def test_textile_chroma_is_direction_independent_for_pale_yellow_shape():
+    image = np.full((220, 300, 3), (132, 132, 132), np.uint8)
+    truth = np.zeros(image.shape[:2], np.uint8)
+    points = np.array(
+        [[55, 38], [205, 42], [235, 90], [217, 176], [158, 190],
+         [118, 171], [66, 185], [42, 118]],
+        np.int32,
+    )
+    cv2.fillPoly(truth, [points], 255)
+    image[truth > 0] = (142, 151, 162)
+
+    result = build_assisted_mask(image, "textile_chroma")
+
+    assert mask_iou(result.mask, truth) > 0.95
+
+
 def test_dark_textile_texture_extracts_black_part_from_dark_surface():
     gradient = np.linspace(32, 72, 480, dtype=np.uint8)
     image = np.repeat(gradient[None, :, None], 360, axis=0)

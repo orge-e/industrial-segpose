@@ -7,13 +7,17 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .white_textile import segment_white_textile
+
 
 METHOD_LABELS = {
     "auto": "智能组合",
     "textile_chroma": "纺织色度分割",
     "dark_textile": "暗色纹理分割",
+    "white_cut_seam": "白色裁剪缝分割",
     "grabcut": "GrabCut",
     "border_color": "边界颜色差",
+    "detached_textile": "独立工件背景建模",
     "otsu_light": "亮目标 Otsu",
     "otsu_dark": "暗目标 Otsu",
 }
@@ -161,15 +165,93 @@ def _border_color(image: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _textile_chroma(image: np.ndarray) -> np.ndarray:
+def extract_detached_textile_candidates(image: np.ndarray) -> np.ndarray:
+    """Segment a detached textile part from a mostly smooth support surface.
+
+    A linear Lab background model is fitted from robust border samples.  This
+    cancels the broad exposure gradient visible in real field captures. A weak
+    response is then grown from reliable seeds so wrinkles do not split a pale
+    target or leave only its brightest half.
+    """
+
+    lab = cv2.cvtColor(cv2.medianBlur(image, 3), cv2.COLOR_BGR2LAB).astype(np.float32)
+    height, width = lab.shape[:2]
+    strip = max(4, int(round(min(height, width) * 0.075)))
+    border_mask = np.zeros((height, width), np.uint8)
+    border_mask[:strip] = 1
+    border_mask[-strip:] = 1
+    border_mask[:, :strip] = 1
+    border_mask[:, -strip:] = 1
+
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    nx = (xx - width * 0.5) / max(float(width), 1.0)
+    ny = (yy - height * 0.5) / max(float(height), 1.0)
+    border = border_mask > 0
+    design = np.column_stack((np.ones(int(np.count_nonzero(border))), nx[border], ny[border]))
+    samples = lab[border]
+
+    median = np.median(samples, axis=0)
+    mad = np.maximum(np.median(np.abs(samples - median), axis=0) * 1.4826, (5.0, 2.5, 2.5))
+    inlier = np.sqrt(np.sum(((samples - median) / mad) ** 2, axis=1)) <= 3.5
+    fit_design, fit_samples = (design[inlier], samples[inlier]) if int(np.count_nonzero(inlier)) >= 30 else (design, samples)
+    coefficients, *_ = np.linalg.lstsq(fit_design, fit_samples, rcond=None)
+    full_design = np.stack((np.ones_like(nx), nx, ny), axis=2)
+    background = full_design @ coefficients
+    residual = lab - background
+
+    border_residual = residual[border]
+    scale = np.maximum(np.median(np.abs(border_residual), axis=0) * 1.4826, (5.5, 2.8, 2.8))
+    distance = np.sqrt(np.sum((residual / scale) ** 2, axis=2))
+    distance = cv2.GaussianBlur(distance.astype(np.float32), (0, 0), 1.5)
+    upper = max(float(np.percentile(distance, 99.5)), 1.0)
+    response = np.clip(distance / upper * 255.0, 0, 255).astype(np.uint8)
+    otsu, _ = cv2.threshold(response, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    strong_threshold = max(28.0, float(otsu))
+    weak_threshold = max(15.0, strong_threshold * 0.48)
+    strong = response >= strong_threshold
+    weak = np.where(response >= weak_threshold, 255, 0).astype(np.uint8)
+
+    size = max(3, int(round(min(height, width) * 0.006)))
+    if size % 2 == 0:
+        size += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    weak = cv2.morphologyEx(weak, cv2.MORPH_CLOSE, kernel, iterations=2)
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(weak, connectivity=8)
+    output = np.zeros((height, width), np.uint8)
+    center = np.asarray([width * 0.5, height * 0.5])
+    diagonal = max(float(np.hypot(width, height)), 1.0)
+    ranked: list[tuple[float, int]] = []
+    for label in range(1, count):
+        component = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < max(25, int(height * width * 0.002)) or not np.any(strong & component):
+            continue
+        distance_to_center = float(np.linalg.norm(centroids[label] - center)) / diagonal
+        x, y, component_width, component_height = map(int, stats[label, :4])
+        touches_border = x == 0 or y == 0 or x + component_width == width or y + component_height == height
+        score = area * max(0.2, 1.0 - 1.8 * distance_to_center) * (0.35 if touches_border else 1.0)
+        ranked.append((score, label))
+    if ranked:
+        output[labels == max(ranked)[1]] = 255
+        output = cv2.morphologyEx(output, cv2.MORPH_CLOSE, kernel, iterations=2)
+    return output
+
+
+def extract_textile_chroma_candidates(image: np.ndarray) -> np.ndarray:
     """Extract lightly colored textile from a neutral/gray background."""
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    a_channel = cv2.GaussianBlur(lab[:, :, 1], (9, 9), 0)
-    saturation = cv2.GaussianBlur(hsv[:, :, 1], (9, 9), 0)
-    _, a_mask = cv2.threshold(a_channel, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    _, saturation_mask = cv2.threshold(saturation, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    combined = cv2.bitwise_or(a_mask, saturation_mask)
+    lab = cv2.cvtColor(cv2.medianBlur(image, 3), cv2.COLOR_BGR2LAB).astype(np.float32)
+    # A single a-channel threshold has an arbitrary direction: for pale yellow
+    # parts it selects nearly the entire neutral table.  Euclidean chroma is
+    # direction-independent and therefore works for pink, yellow, blue, etc.
+    chroma = np.linalg.norm(lab[:, :, 1:] - 128.0, axis=2)
+    chroma = cv2.GaussianBlur(chroma.astype(np.float32), (0, 0), 2.0)
+    upper = max(float(np.percentile(chroma, 99.5)), 1.0)
+    response = np.clip(chroma / upper * 255.0, 0, 255).astype(np.uint8)
+    threshold, _ = cv2.threshold(response, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # A small absolute floor rejects low-level colour casts from auto white balance
+    # sensor while retaining low-saturation textile under weak exposure.
+    absolute_floor = min(255.0, 3.0 / upper * 255.0)
+    combined = np.where(response >= max(float(threshold), absolute_floor), 255, 0).astype(np.uint8)
     kernel_size = max(5, int(round(min(image.shape[:2]) * 0.02)))
     if kernel_size % 2 == 0:
         kernel_size += 1
@@ -206,7 +288,17 @@ def extract_dark_textile_candidates(image: np.ndarray) -> np.ndarray:
         size += 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
-    return cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    # Weave energy is sparse inside very dark fabric.  Filling each external
+    # response contour restores the physical silhouette while keeping separate
+    # workpieces as separate connected components.
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(binary)
+    minimum_contour_area = max(20.0, image.shape[0] * image.shape[1] * 0.001)
+    for contour in contours:
+        if cv2.contourArea(contour) >= minimum_contour_area:
+            cv2.drawContours(filled, [contour], -1, 255, -1)
+    return filled
 
 
 def _otsu(image: np.ndarray, inverse: bool) -> np.ndarray:
@@ -238,14 +330,21 @@ def _quality(image: np.ndarray, mask: np.ndarray) -> float:
 
 
 def _candidate(image: np.ndarray, method: str) -> AssistedMaskResult:
+    method_quality: float | None = None
     if method == "grabcut":
         raw = _grabcut(image)
     elif method == "textile_chroma":
-        raw = _textile_chroma(image)
+        raw = extract_textile_chroma_candidates(image)
     elif method == "dark_textile":
         raw = extract_dark_textile_candidates(image)
+    elif method == "white_cut_seam":
+        white_result = segment_white_textile(image)
+        raw = white_result.mask
+        method_quality = white_result.quality_score
     elif method == "border_color":
         raw = _border_color(image)
+    elif method == "detached_textile":
+        raw = extract_detached_textile_candidates(image)
     elif method == "otsu_light":
         raw = _otsu(image, False)
     elif method == "otsu_dark":
@@ -254,7 +353,10 @@ def _candidate(image: np.ndarray, method: str) -> AssistedMaskResult:
         raise ValueError(f"Unknown assisted mask method: {method}")
     mask = _main_component(raw, image)
     coverage = float(np.count_nonzero(mask) / mask.size)
-    return AssistedMaskResult(mask, method, METHOD_LABELS[method], coverage, _quality(image, mask))
+    quality = _quality(image, mask)
+    if method_quality is not None:
+        quality = max(quality, method_quality)
+    return AssistedMaskResult(mask, method, METHOD_LABELS[method], coverage, quality)
 
 
 def build_assisted_mask(image: np.ndarray, method: str = "auto") -> AssistedMaskResult:
@@ -266,25 +368,49 @@ def build_assisted_mask(image: np.ndarray, method: str = "auto") -> AssistedMask
         if method not in METHOD_LABELS:
             raise ValueError(f"Unknown assisted mask method: {method}")
         return _candidate(image, method)
-    methods = ["textile_chroma", "dark_textile", "otsu_light", "otsu_dark"]
-    # GrabCut and full colour-distance estimation are useful on small crops but
-    # disproportionately expensive on phone-camera images.  The four fast
-    # methods above cover the light, dark and coloured textile cases.
-    if image.shape[0] * image.shape[1] <= 1_000_000:
-        methods.extend(("grabcut", "border_color"))
+    methods = [
+        "textile_chroma", "dark_textile", "white_cut_seam",
+        "detached_textile", "border_color", "otsu_light", "otsu_dark",
+    ]
+    # GrabCut remains available as an explicit manual option, but is not part
+    # of automatic competition. Four iterations were taking seconds per compact-camera
+    # frame and could freeze the template-building UI.
     results = [_candidate(image, name) for name in methods]
     best = max(results, key=lambda item: item.quality_score)
     textile = results[0]
-    border_saturation = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[:, :, 1]
-    border_band = np.concatenate([border_saturation[0], border_saturation[-1], border_saturation[:, 0], border_saturation[:, -1]])
-    neutral_background = float(np.median(border_band)) < 45.0
+    white_cut = results[2]
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    chroma = np.linalg.norm(lab[:, :, 1:] - 128.0, axis=2)
+    border_band = np.concatenate([chroma[0], chroma[-1], chroma[:, 0], chroma[:, -1]])
+    neutral_background = float(np.median(border_band)) < 8.0
     textile_points = cv2.findNonZero(textile.mask)
     textile_is_internal = False
     if textile_points is not None:
         tx, ty, tw, th = cv2.boundingRect(textile_points)
         textile_is_internal = tx > 0 and ty > 0 and tx + tw < image.shape[1] and ty + th < image.shape[0]
-    if neutral_background and textile_is_internal and 0.03 <= textile.coverage <= 0.80 and textile.quality_score >= 0.15:
+    textile_selected = textile.mask > 0
+    textile_chroma_gain = (
+        float(np.median(chroma[textile_selected])) - float(np.median(border_band))
+        if np.any(textile_selected) else 0.0
+    )
+    if (
+        neutral_background
+        and textile_is_internal
+        and textile_chroma_gain >= 3.0
+        and 0.03 <= textile.coverage <= 0.80
+        and textile.quality_score >= 0.15
+    ):
         best = textile
+    # A cut piece still embedded in the source sheet is an internal region,
+    # while chroma segmentation usually returns the much larger mother sheet.
+    # Prefer a credible seam-enclosed region when this size relationship makes
+    # the two interpretations unambiguous.
+    if (
+        white_cut.quality_score >= 0.55
+        and 0.002 <= white_cut.coverage <= 0.35
+        and textile.coverage >= white_cut.coverage * 2.0
+    ):
+        best = white_cut
     return AssistedMaskResult(best.mask, best.method, f"智能组合 → {best.method_label}", best.coverage, best.quality_score)
 
 

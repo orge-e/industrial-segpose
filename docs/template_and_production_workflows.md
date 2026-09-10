@@ -69,47 +69,11 @@ python -m industrial_segpose.template_ui
 
 同一轨迹只累计一次。正式相机建议锁定曝光、增益、焦距、分辨率和安装位置。
 
-## 5. K230 采集图像与模板工作台
+## 5. 版本边界
 
-桌面端可以读取 K230 SD 卡中的采集目录，例如：
+v0.11 起，本仓库聚焦 PC 端工业视觉工作站、数据评估和生产流程，不再维护早期 K230 板端运行时。早期 K230 实验代码与文档保留在 `milestone/pink-textile-stable` 和 `archive/pink-line-before-squash` 标签中，便于追溯研究过程。
 
-```text
-industrial_vision/
-captures/
-session_NNNN/
-```
-
-推荐流程：
-
-1. 从现场采集批次中选择基准图。
-2. 在 PC 端完成精细分割和 Mask 修正。
-3. 保存到电脑端模板库。
-4. 使用其他现场图片批量回放验证。
-5. 导出 K230 所需模板与配置。
-6. 生成完整部署包。
-7. 人工复制到 SD 卡。
-
-项目不会自动覆盖 SD 卡根目录的启动文件。
-
-## 6. K230 离线验证
-
-模板导出：
-
-```powershell
-python -m industrial_segpose.k230_export --library templates --output build/k230_templates --overwrite
-```
-
-使用现场采集图片进行离线回放：
-
-```powershell
-python -m industrial_segpose.k230_validation --bundle build/k230_templates/template_library.json --images <采集图片目录> --output reports/k230_validation
-```
-
-当前生产策略优先采用“PC 端建立和验证模板，K230 加载已验证模板执行检测”，降低板端直接建模带来的不确定性。
-
-更完整的板端目录、协议和部署说明见 [k230_development.md](k230_development.md)。
-
-## 7. 使用边界
+## 6. 使用边界
 
 模板匹配适合目标外观稳定、尺度变化有限、相机视角和照明可控的工业场景。
 
