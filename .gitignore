@@ -16,6 +16,7 @@ datasets/real/*/
 Testimg/
 .venv/
 .venv-qt/
+.vscode/
 build/
 dist/
 *.egg-info/

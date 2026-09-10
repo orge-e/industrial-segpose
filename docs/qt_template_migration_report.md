@@ -73,9 +73,9 @@ industrial_segpose/ui_qt/
 
 ## 截图
 
-- `design/ui_redesign/screenshots/qt_template_page.png`
-- `design/ui_redesign/screenshots/qt_template_page_1920x1080.png`
-- `design/ui_redesign/screenshots/qt_template_page_125pct.png`
+- `docs/design/ui_redesign/screenshots/qt_template_page.png`
+- `docs/design/ui_redesign/screenshots/qt_template_page_1920x1080.png`
+- `docs/design/ui_redesign/screenshots/qt_template_page_125pct.png`
 
 ## 未修改的业务资产
 
